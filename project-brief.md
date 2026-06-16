@@ -1,5 +1,5 @@
 # Project Brief & Context Primer
-### (a personal "summon-first" knowledge tool — name TBD)
+### Recall — a personal "summon-first" knowledge tool
 
 > **If you are an AI reading this cold:** this document is the complete context for a project in **active build** — the design is settled and a working app already exists. Read all of it before responding. Treat the decisions below as decisions, not openings for debate. Do not reintroduce ideas marked as rejected (especially: no LLMs inside the tool, no *third-party* cloud — the owner's own homelab server is the data home, see §7 — and no browse-first UI). When a new design choice comes up, judge it against the north star in §1 and the constraints in §7. The person you're helping is the builder; match the working style in §3.
 
