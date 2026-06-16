@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>summon</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #080808; }
+
+    #app {
+      background: #080808;
+      color: #f0ede8;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      padding: 20px 22px 28px;
+    }
+
+    /* ---- bloom ---- */
+    .bloom { animation: bloom .42s cubic-bezier(.2,.7,.25,1) both; }
+    @keyframes bloom {
+      from { opacity: 0; transform: scale(.7); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+
+    /* ---- neighbour node hover / focus ---- */
+    .nb-group:hover rect     { stroke-opacity: 1 !important; }
+    .nb-group:focus-visible  { outline: none; }
+    .nb-group:focus-visible rect { stroke: #c0392b !important; stroke-opacity: 1 !important; }
+
+    /* ---- misc ---- */
+    /* Override WebKit UA "ButtonText" which makes buttons black on black backgrounds */
+    button { color: inherit; -webkit-appearance: none; appearance: none; }
+    input::placeholder { color: #666; opacity: .9; }
+    button:focus-visible { outline: 2px solid #c0392b; outline-offset: 2px; border-radius: 8px; }
+    .result-btn:hover { background: rgba(255,255,255,0.07) !important; }
+    @media (prefers-reduced-motion: reduce) { .bloom { animation: none; } }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ---- overlay (editor + link picker modals) ---- -->
+  <div id="overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.78);z-index:100;align-items:center;justify-content:center;padding:20px;"></div>
+
+  <!-- ---- summon bar (always in DOM so input never loses focus) ---- -->
+  <header style="display:flex;align-items:center;gap:18px;">
+    <button id="home-btn" aria-label="Home — return to empty screen"
+      style="font-family:ui-monospace,'SF Mono','JetBrains Mono',Menlo,monospace;font-size:14px;letter-spacing:0.12em;color:#f0ede8;text-transform:lowercase;flex-shrink:0;background:transparent;border:none;cursor:pointer;padding:0;">
+      <span style="color:#c0392b;">✦</span> summon
+    </button>
+    <button id="new-node-btn" aria-label="Create new node"
+      style="font-family:ui-monospace,'SF Mono','JetBrains Mono',Menlo,monospace;font-size:12px;background:rgba(192,57,43,0.15);border:1px solid rgba(192,57,43,0.35);border-radius:7px;padding:6px 12px;color:#c0392b;cursor:pointer;flex-shrink:0;white-space:nowrap;">
+      + New
+    </button>
+    <div style="position:relative;flex:1;display:flex;align-items:center;gap:10px;background:linear-gradient(145deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03));backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%);border:1px solid rgba(255,255,255,0.13);box-shadow:inset 0 1px 0 rgba(255,255,255,0.10),0 4px 24px rgba(0,0,0,0.5);border-radius:10px;padding:10px 12px;">
+      <!-- search icon -->
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+        <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+      </svg>
+      <input id="search-input"
+        placeholder="summon a thing…  try a name, a type, or a detail like &quot;create&quot; or &quot;fabric&quot;"
+        autocomplete="off" spellcheck="false"
+        aria-label="Summon search"
+        style="flex:1;background:transparent;border:none;outline:none;color:#f0ede8;font-family:ui-monospace,'SF Mono','JetBrains Mono',Menlo,monospace;font-size:14px;"
+      />
+      <!-- enter hint -->
+      <kbd id="enter-hint" style="display:none;align-items:center;color:#666;border:1px solid rgba(255,255,255,0.12);border-radius:5px;padding:2px 5px;">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>
+        </svg>
+      </kbd>
+      <!-- dropdown results -->
+      <ul id="search-results" style="display:none;position:absolute;top:calc(100% + 8px);left:0;right:0;background:linear-gradient(160deg,rgba(30,20,20,0.96),rgba(15,12,12,0.98));backdrop-filter:blur(20px) saturate(160%);-webkit-backdrop-filter:blur(20px) saturate(160%);border:1px solid rgba(255,255,255,0.13);box-shadow:inset 0 1px 0 rgba(255,255,255,0.07),0 18px 48px rgba(0,0,0,0.7);border-radius:10px;list-style:none;margin:0;padding:6px;z-index:20;"></ul>
+    </div>
+  </header>
+
+  <!-- ---- trail ---- -->
+  <nav id="trail" style="display:none;margin-top:14px;align-items:center;flex-wrap:wrap;gap:2px;font-size:12.5px;color:#f0ede8;" aria-label="Path"></nav>
+
+  <!-- ---- stage ---- -->
+  <main id="stage" style="margin-top:10px;"></main>
+
+</div>
+<script>
+// ============================================================
+//  Config
+// ============================================================
+const API_BASE = "http://localhost:8000";
+
+// ============================================================
+//  Constants (mirror the prototype palette + layout exactly)
+// ============================================================
+const C = {
+  ink:    "#080808",
+  ink2:   "#111",
+  paper:  "#f0ede8",
+  muted:  "#aaa",
+  sep:    "#3a3a3a",    // trail separators / dividers — visible on black
+  red:    "#c0392b",    // primary accent
+  amber:  "#c49a3c",    // warm secondary — property keys, highlights
+  blue:   "#4f86b0",    // cool tertiary — type badges, info
+  rose:   "#b87fa0",    // made_of edges
+  slate:  "#6a8fa8",    // lives_in edges
+};
+
+// Glass panel — gradient + border does the heavy lifting for WebKit fallback.
+// backdrop-filter kicks in on supporting engines for the frosted blur effect.
+const glass = `
+  background: linear-gradient(145deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 100%);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  border: 1px solid rgba(255,255,255,0.13);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.10), 0 4px 24px rgba(0,0,0,0.5);
+`.replace(/\n\s*/g, "");
+
+const EDGE_COLOR = C.red;
+
+const VB = { w: 880, h: 560, cx: 440, cy: 285, r: 200 };
+
+const mono = 'ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace';
+const sans = 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif';
+
+// ============================================================
+//  State
+// ============================================================
+let focusNode    = null;   // full object from GET /nodes/{id}
+let trail        = [];     // [{id, name}]
+let searchResults = [];    // from GET /search
+let searchOpen   = false;
+let lastFocusId  = null;   // to gate the bloom animation
+
+// editor state
+let editorNode  = null;    // null=closed | {mode:'create'} | {mode:'edit', node}
+let editorProps = [];      // [{key, value}] — live rows in the property table
+
+// link picker state
+let linkPicker  = null;    // null=closed | {target:null|node, q:'', results:[], label:''}
+
+// ============================================================
+//  Utilities
+// ============================================================
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function trunc(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+function layoutNeighbours(neighbours, prevId = null) {
+  // If the user navigated here from a neighbour, pin that neighbour at 12 o'clock (index 0).
+  let sorted = [...neighbours];
+  if (prevId != null) {
+    const pi = sorted.findIndex(nb => nb.node.id === prevId);
+    if (pi > 0) sorted.unshift(...sorted.splice(pi, 1));
+  }
+  const N = sorted.length;
+  return sorted.map((nb, i) => {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / Math.max(N, 1);
+    return { ...nb, x: VB.cx + VB.r * Math.cos(a), y: VB.cy + VB.r * Math.sin(a) };
+  });
+}
+
+// Best-effort reason text from client side (API doesn't return match kind)
+function inferReason(node, q) {
+  const ql = q.trim().toLowerCase();
+  if (node.name.toLowerCase().includes(ql)) return null; // name hit — no badge needed
+  for (const [k, v] of Object.entries(node.properties || {}))
+    if (String(v).toLowerCase().includes(ql)) return `matched  ${k}: ${v}`;
+  if (node.type.toLowerCase().includes(ql)) return `type · ${node.type}`;
+  return "linked to match"; // neighbour-name hit
+}
+
+// ============================================================
+//  API
+// ============================================================
+let debounceTimer = null;
+
+function scheduleSearch(q) {
+  clearTimeout(debounceTimer);
+  if (!q.trim()) { searchResults = []; renderResults(); return; }
+  debounceTimer = setTimeout(async () => {
+    try {
+      const res  = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      searchResults = data.results || [];
+    } catch { searchResults = []; }
+    renderResults();
+  }, 120);
+}
+
+async function fetchNode(id) {
+  const res = await fetch(`${API_BASE}/nodes/${id}`);
+  if (!res.ok) throw new Error(`Node ${id} not found`);
+  return res.json();
+}
+
+// Distinct link labels already in the DB (most-common first) — for the label datalist.
+async function fetchLinkLabels() {
+  try {
+    const res  = await fetch(`${API_BASE}/links/labels`);
+    const data = await res.json();
+    return data.labels || [];
+  } catch { return []; }
+}
+
+// Distinct types already in the DB (most-used first) — for the type autocomplete.
+async function fetchTypes() {
+  try {
+    const res  = await fetch(`${API_BASE}/types`);
+    const data = await res.json();
+    return data.types || [];
+  } catch { return []; }
+}
+
+// Learned template: property keys nodes of this type commonly have.
+async function fetchTypeFields(type) {
+  if (!type.trim()) return [];
+  try {
+    const res  = await fetch(`${API_BASE}/types/${encodeURIComponent(type)}/fields`);
+    const data = await res.json();
+    return data.fields || [];
+  } catch { return []; }
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { const t = await res.text(); throw new Error(t); }
+  return res.json();
+}
+
+async function apiPatch(path, body) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { const t = await res.text(); throw new Error(t); }
+  return res.json();
+}
+
+function saveSession() {
+  fetch(`${API_BASE}/session`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ focus_id: focusNode?.id ?? null, trail }),
+  }).catch(() => {});
+}
+
+async function apiDelete(path) {
+  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+  if (!res.ok) { const t = await res.text(); throw new Error(t); }
+  return res.json();
+}
+
+// ============================================================
+//  Actions
+// ============================================================
+async function summon(id) {
+  const node = await fetchNode(id);
+  const bloom = lastFocusId !== id;
+  focusNode   = node;
+  lastFocusId = id;
+
+  // If the target is already in the trail, rewind to that position instead of appending.
+  const existingIdx = trail.findIndex(t => t.id === id);
+  if (existingIdx !== -1) {
+    trail = trail.slice(0, existingIdx + 1);
+  } else {
+    trail.push({ id, name: node.name });
+  }
+
+  searchOpen = false;
+  document.getElementById("search-input").value = "";
+  searchResults = [];
+
+  saveSession();
+  renderResults();
+  renderTrail();
+  renderStage(bloom);
+}
+
+async function jumpTo(id, i) {
+  // Truncate to clicked position — do NOT re-push (summon() would append).
+  trail = trail.slice(0, i + 1);
+  const node  = await fetchNode(id);
+  focusNode   = node;
+  lastFocusId = id;
+  saveSession();
+  renderTrail();
+  renderStage(true);
+}
+
+// Quick-summon from the empty-state chip: search by name, land on first hit.
+async function summonByName(name) {
+  try {
+    const res  = await fetch(`${API_BASE}/search?q=${encodeURIComponent(name)}`);
+    const data = await res.json();
+    const hit  = (data.results || []).find(r => r.name === name) || data.results?.[0];
+    if (hit) summon(hit.id);
+  } catch { /* ignore */ }
+}
+
+// ============================================================
+//  Editor (create / edit node)
+// ============================================================
+
+function openEditor(node = null) {
+  // Create from a focused node → offer to link the new node back to it on save.
+  editorNode  = node
+    ? { mode: "edit", node }
+    : { mode: "create", linkTo: focusNode ? { id: focusNode.id, name: focusNode.name } : null };
+  editorProps = node
+    ? Object.entries(node.properties || {}).map(([key, value]) => ({ key, value }))
+    : [];
+  renderEditor();
+}
+
+// Pre-fill property rows from a type's learned template. Only adds keys not
+// already present; never wipes values the user already typed. Create mode only.
+async function applyTemplate(type) {
+  if (editorNode?.mode !== "create") return;
+  const fields = await fetchTypeFields(type);
+  if (!fields.length) return;
+  if (editorNode?.mode !== "create") return; // re-check after await
+  syncEditorProps();
+  const have = new Set(editorProps.map(p => p.key.trim()).filter(Boolean));
+  for (const key of fields)
+    if (!have.has(key)) { editorProps.push({ key, value: "" }); have.add(key); }
+  renderEditorProps();
+}
+
+function closeOverlay() {
+  editorNode = null; editorProps = [];
+  linkPicker = null;
+  const ov = document.getElementById("overlay");
+  ov.style.display = "none";
+  ov.innerHTML = "";
+}
+
+function renderEditor() {
+  const ov = document.getElementById("overlay");
+  ov.style.display = "flex";
+  const isEdit = editorNode?.mode === "edit";
+  const node   = isEdit ? editorNode.node : null;
+
+  ov.innerHTML = `
+    <div id="modal" style="${glass}border-radius:14px;padding:24px;width:100%;max-width:500px;max-height:85vh;overflow-y:auto;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+        <span style="font-family:${mono};font-size:13px;color:${C.red};">${isEdit ? "Edit node" : "New node"}</span>
+        <button class="ov-close" style="background:transparent;border:none;cursor:pointer;font-size:22px;line-height:1;color:${C.muted};padding:0 2px;">×</button>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <label style="display:flex;flex-direction:column;gap:5px;">
+          <span style="font-family:${mono};font-size:10px;color:${C.amber};text-transform:uppercase;letter-spacing:0.07em;">Name</span>
+          <input id="ed-name" value="${esc(node?.name ?? "")}" autocomplete="off"
+            style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:7px;padding:8px 10px;color:#f0ede8;font-family:${mono};font-size:13px;outline:none;width:100%;">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:5px;">
+          <span style="font-family:${mono};font-size:10px;color:${C.amber};text-transform:uppercase;letter-spacing:0.07em;">Type</span>
+          <input id="ed-type" value="${esc(node?.type ?? "")}" list="ed-type-list"
+            placeholder="server, drive, procedure…" autocomplete="off"
+            style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:7px;padding:8px 10px;color:#f0ede8;font-family:${mono};font-size:13px;outline:none;width:100%;">
+          <datalist id="ed-type-list"></datalist>
+        </label>
+        <div>
+          <span style="font-family:${mono};font-size:10px;color:${C.amber};text-transform:uppercase;letter-spacing:0.07em;">Properties</span>
+          <div id="ed-props" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;"></div>
+          <button id="ed-add-prop"
+            style="margin-top:8px;background:transparent;border:1px dashed rgba(255,255,255,0.18);border-radius:6px;padding:5px 12px;color:${C.muted};font-family:${mono};font-size:11px;cursor:pointer;width:100%;">
+            + add property
+          </button>
+        </div>
+      </div>
+
+      <div id="ed-linkback"></div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:22px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.08);">
+        ${isEdit
+          ? `<button id="ed-delete" style="background:transparent;border:1px solid rgba(192,57,43,0.35);border-radius:7px;padding:6px 13px;color:${C.red};font-family:${mono};font-size:11.5px;cursor:pointer;">Delete node</button>`
+          : `<span></span>`}
+        <div style="display:flex;gap:8px;">
+          <button class="ov-close" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:7px;padding:6px 15px;color:${C.muted};font-family:${mono};font-size:11.5px;cursor:pointer;">Cancel</button>
+          <button id="ed-save" style="background:${C.red};border:none;border-radius:7px;padding:6px 18px;color:#fff;font-family:${mono};font-size:11.5px;cursor:pointer;font-weight:600;">Save</button>
+        </div>
+      </div>
+    </div>`;
+
+  renderEditorProps();
+  document.getElementById("ed-name").focus();
+  document.getElementById("ed-add-prop").onclick = () => {
+    syncEditorProps();
+    editorProps.push({ key: "", value: "" });
+    renderEditorProps();
+    const keys = document.querySelectorAll(".ep-key");
+    keys[keys.length - 1]?.focus();
+  };
+  document.getElementById("ed-save").onclick = saveEditor;
+  if (isEdit) document.getElementById("ed-delete").onclick = deleteCurrentNode;
+  ov.querySelectorAll(".ov-close").forEach(b => b.onclick = closeOverlay);
+  ov.onclick = e => { if (e.target === ov) closeOverlay(); };
+
+  // Populate the type autocomplete with types already in the DB (most-used
+  // first) so users reuse existing types instead of minting near-duplicates.
+  fetchTypes().then(types => {
+    const dl = document.getElementById("ed-type-list");
+    if (!dl) return; // editor may have closed while the request was in flight
+    dl.innerHTML = types.map(t => `<option value="${esc(t.type)}"></option>`).join("");
+  });
+
+  if (!isEdit) {
+    // Create mode: pre-fill from the learned template for the current type,
+    // and refresh suggestions whenever the type changes. Type starts empty,
+    // so no template is applied until a type is actually chosen/typed.
+    const typeInp = document.getElementById("ed-type");
+    typeInp.onchange = () => applyTemplate(typeInp.value.trim());
+  }
+}
+
+function renderEditorProps() {
+  const container = document.getElementById("ed-props");
+  if (!container) return;
+  container.innerHTML = editorProps.map((p, i) => `
+    <div style="display:flex;gap:6px;align-items:center;">
+      <input class="ep-key" data-pi="${i}" value="${esc(p.key)}" placeholder="key"
+        style="width:36%;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:6px;padding:6px 8px;color:#f0ede8;font-family:${mono};font-size:12px;outline:none;">
+      <input class="ep-val" data-pi="${i}" value="${esc(p.value)}" placeholder="value"
+        style="flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:6px;padding:6px 8px;color:#f0ede8;font-family:${mono};font-size:12px;outline:none;">
+      <button class="ep-rm" data-pi="${i}"
+        style="background:transparent;border:none;cursor:pointer;color:${C.muted};font-size:18px;line-height:1;padding:0 3px;flex-shrink:0;">×</button>
+    </div>`).join("");
+
+  container.querySelectorAll(".ep-rm").forEach(btn => btn.onclick = () => {
+    syncEditorProps();
+    editorProps.splice(+btn.dataset.pi, 1);
+    renderEditorProps();
+  });
+}
+
+// Inline "link the new node back to the focused node?" step, shown at the
+// bottom of the create editor after the first Save click. Create mode only.
+function renderLinkBackStep() {
+  const c = document.getElementById("ed-linkback");
+  if (!c || !editorNode?.linkTo) return;
+  const yes = editorNode.linkYes;
+  const onStyle  = `background:${C.red};border:1px solid ${C.red};color:#fff;`;
+  const offStyle = `background:#1c1c1c;border:1px solid #333;color:#888;`;
+  const btnBase  = `border-radius:7px;padding:6px 16px;font-family:ui-monospace,monospace;font-size:11.5px;cursor:pointer;`;
+
+  c.innerHTML = `
+    <div style="margin-top:18px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.08);">
+      <span style="font-family:${mono};font-size:11.5px;color:${C.muted};">
+        Link to <span style="color:${C.paper};">${esc(editorNode.linkTo.name)}</span>?
+      </span>
+      <div style="display:flex;gap:8px;margin-top:9px;">
+        <button id="lb-yes" style="${btnBase}${yes ? onStyle : offStyle}">Yes</button>
+        <button id="lb-no"  style="${btnBase}${yes ? offStyle : onStyle}">No</button>
+      </div>
+      ${yes ? `
+        <label style="display:flex;flex-direction:column;gap:5px;margin-top:12px;">
+          <span style="font-family:${mono};font-size:10px;color:${C.amber};text-transform:uppercase;letter-spacing:0.07em;">Label</span>
+          <input id="lb-label" value="${esc(editorNode.linkLabel || "")}" placeholder="e.g. runs on, backup of…"
+            list="lb-label-list" autocomplete="off"
+            style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:7px;padding:8px 10px;color:#f0ede8;font-family:${mono};font-size:13px;outline:none;width:100%;">
+          <datalist id="lb-label-list"></datalist>
+        </label>` : ``}
+    </div>`;
+
+  document.getElementById("lb-yes").onclick = () => { editorNode.linkYes = true;  renderLinkBackStep(); };
+  document.getElementById("lb-no").onclick  = () => { editorNode.linkYes = false; renderLinkBackStep(); };
+  if (yes) {
+    const lbl = document.getElementById("lb-label");
+    lbl.oninput = e => { editorNode.linkLabel = e.target.value; };
+    lbl.focus();
+    fetchLinkLabels().then(labels => {
+      const dl = document.getElementById("lb-label-list");
+      if (!dl) return;
+      dl.innerHTML = labels.map(l => `<option value="${esc(l)}"></option>`).join("");
+    });
+  }
+}
+
+function syncEditorProps() {
+  document.querySelectorAll(".ep-key").forEach(inp => {
+    if (editorProps[+inp.dataset.pi]) editorProps[+inp.dataset.pi].key = inp.value;
+  });
+  document.querySelectorAll(".ep-val").forEach(inp => {
+    if (editorProps[+inp.dataset.pi]) editorProps[+inp.dataset.pi].value = inp.value;
+  });
+}
+
+async function saveEditor() {
+  syncEditorProps();
+  const name = document.getElementById("ed-name").value.trim();
+  const type = document.getElementById("ed-type").value.trim() || "thing";
+  if (!name) {
+    document.getElementById("ed-name").style.borderColor = C.red;
+    return;
+  }
+  const properties = {};
+  for (const { key, value } of editorProps)
+    if (key.trim()) properties[key.trim()] = value;
+
+  // Create-from-focused-node: gate the first Save on the inline link-back step.
+  if (editorNode.mode === "create" && editorNode.linkTo && !editorNode.linkAsked) {
+    editorNode.linkAsked = true;
+    editorNode.linkYes   = true;   // default to linking, since the user created from this node
+    editorNode.linkLabel = "";
+    renderLinkBackStep();
+    return;
+  }
+
+  try {
+    let node;
+    if (editorNode.mode === "create") {
+      node = await apiPost("/nodes", { name, type, properties });
+      // Link the new node back to the node it was created from, if requested.
+      if (editorNode.linkTo && editorNode.linkYes) {
+        const label = (editorNode.linkLabel || "").trim() || null;
+        await apiPost("/links", { source_id: node.id, target_id: editorNode.linkTo.id, label });
+      }
+    } else {
+      const existing = editorNode.node.properties || {};
+      const propPatch = { ...properties };
+      // mark deleted keys as null so the backend removes them
+      for (const k of Object.keys(existing))
+        if (!(k in properties)) propPatch[k] = null;
+      node = await apiPatch(`/nodes/${editorNode.node.id}`, { name, type, properties: propPatch });
+    }
+    closeOverlay();
+    await summon(node.id);
+  } catch (e) {
+    alert(`Save failed: ${e.message}`);
+  }
+}
+
+async function deleteCurrentNode() {
+  if (editorNode?.mode !== "edit") return;
+  const node = editorNode.node;
+  // Use focusNode.neighbours.length for the count — it covers all links.
+  const linkCount = (focusNode?.neighbours || []).length;
+  const plural = linkCount === 1 ? "link" : "links";
+  if (!confirm(`Delete "${node.name}" and its ${linkCount} ${plural}?`)) return;
+  try {
+    await apiDelete(`/nodes/${node.id}`);
+    closeOverlay();
+    focusNode = null; lastFocusId = null; trail = [];
+    renderTrail();
+    renderStage(false);
+  } catch (e) {
+    alert(`Delete failed: ${e.message}`);
+  }
+}
+
+// ============================================================
+//  Link picker
+// ============================================================
+
+function openLinkPicker() {
+  linkPicker = { target: null, q: "", results: [], label: "" };
+  renderLinkPicker();
+}
+
+function renderLinkPicker() {
+  const ov = document.getElementById("overlay");
+  ov.style.display = "flex";
+  const fromName = focusNode?.name ?? "?";
+
+  if (!linkPicker.target) {
+    // Phase 1: search for target node
+    ov.innerHTML = `
+      <div id="modal" style="${glass}border-radius:14px;padding:24px;width:100%;max-width:460px;max-height:80vh;overflow-y:auto;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+          <span style="font-family:${mono};font-size:13px;color:${C.red};">Add link from <em style="color:${C.paper};font-style:normal;">${esc(fromName)}</em></span>
+          <button class="ov-close" style="background:transparent;border:none;cursor:pointer;font-size:22px;line-height:1;color:${C.muted};padding:0 2px;">×</button>
+        </div>
+        <input id="lp-search" value="${esc(linkPicker.q)}" placeholder="Search for a node…" autocomplete="off"
+          style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:7px;padding:8px 10px;color:#f0ede8;font-family:${mono};font-size:13px;outline:none;margin-bottom:10px;">
+        <ul id="lp-results" style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;">
+          ${linkPicker.results.map(n => `
+            <li><button class="lp-pick" data-nid="${n.id}" data-nname="${esc(n.name)}" data-ntype="${esc(n.type)}"
+              style="width:100%;display:flex;gap:10px;align-items:baseline;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:7px;padding:8px 10px;cursor:pointer;color:#f0ede8;font-family:${mono};font-size:13px;text-align:left;">
+              <span>${esc(n.name)}</span>
+              <span style="font-size:10.5px;color:${C.blue};">${esc(n.type)}</span>
+            </button></li>`).join("")}
+        </ul>
+        <div style="margin-top:16px;text-align:right;">
+          <button class="ov-close" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:7px;padding:6px 15px;color:${C.muted};font-family:${mono};font-size:11.5px;cursor:pointer;">Cancel</button>
+        </div>
+      </div>`;
+
+    document.getElementById("lp-search").oninput = async e => {
+      linkPicker.q = e.target.value;
+      if (!linkPicker.q.trim()) { linkPicker.results = []; renderLinkPicker(); return; }
+      try {
+        const data = await (await fetch(`${API_BASE}/search?q=${encodeURIComponent(linkPicker.q)}`)).json();
+        // exclude the current node from picks
+        linkPicker.results = (data.results || []).filter(n => n.id !== focusNode?.id).slice(0, 8);
+      } catch { linkPicker.results = []; }
+      renderLinkPicker();
+      // restore focus and cursor
+      const inp = document.getElementById("lp-search");
+      if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+    };
+    document.querySelectorAll(".lp-pick").forEach(btn => btn.onclick = () => {
+      linkPicker.target = { id: +btn.dataset.nid, name: btn.dataset.nname, type: btn.dataset.ntype };
+      renderLinkPicker();
+    });
+  } else {
+    // Phase 2: configure the link
+    ov.innerHTML = `
+      <div id="modal" style="${glass}border-radius:14px;padding:24px;width:100%;max-width:420px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+          <span style="font-family:${mono};font-size:13px;color:${C.red};">Configure link</span>
+          <button class="ov-close" style="background:transparent;border:none;cursor:pointer;font-size:22px;line-height:1;color:${C.muted};padding:0 2px;">×</button>
+        </div>
+        <div style="font-family:${mono};font-size:12.5px;color:${C.muted};margin-bottom:18px;">
+          <span style="color:${C.paper};">${esc(fromName)}</span>
+          <span style="color:${C.sep};margin:0 8px;">→</span>
+          <span style="color:${C.paper};">${esc(linkPicker.target.name)}</span>
+          <span style="font-size:10.5px;color:${C.blue};margin-left:6px;">${esc(linkPicker.target.type)}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <label style="display:flex;flex-direction:column;gap:5px;">
+            <span style="font-family:${mono};font-size:10px;color:${C.amber};text-transform:uppercase;letter-spacing:0.07em;">Label</span>
+            <input id="lp-label" value="${esc(linkPicker.label)}" placeholder="e.g. runs on, backup of…"
+              list="lp-label-list" autocomplete="off"
+              style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:7px;padding:8px 10px;color:#f0ede8;font-family:${mono};font-size:13px;outline:none;width:100%;">
+            <datalist id="lp-label-list"></datalist>
+          </label>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:22px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.08);">
+          <button id="lp-back" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:7px;padding:6px 13px;color:${C.muted};font-family:${mono};font-size:11.5px;cursor:pointer;">← Back</button>
+          <div style="display:flex;gap:8px;">
+            <button class="ov-close" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:7px;padding:6px 13px;color:${C.muted};font-family:${mono};font-size:11.5px;cursor:pointer;">Cancel</button>
+            <button id="lp-confirm" style="background:${C.red};border:none;border-radius:7px;padding:6px 18px;color:#fff;font-family:${mono};font-size:11.5px;cursor:pointer;font-weight:600;">Link</button>
+          </div>
+        </div>
+      </div>`;
+
+    document.getElementById("lp-back").onclick = () => {
+      linkPicker.target = null;
+      renderLinkPicker();
+    };
+    document.getElementById("lp-confirm").onclick = saveLinkPicker;
+    document.getElementById("lp-label").oninput = e => { linkPicker.label = e.target.value; };
+    document.getElementById("lp-label").focus();
+    fetchLinkLabels().then(labels => {
+      const dl = document.getElementById("lp-label-list");
+      if (!dl) return;
+      dl.innerHTML = labels.map(l => `<option value="${esc(l)}"></option>`).join("");
+    });
+  }
+
+  ov.querySelectorAll(".ov-close").forEach(b => b.onclick = closeOverlay);
+  ov.onclick = e => { if (e.target === ov) closeOverlay(); };
+}
+
+async function saveLinkPicker() {
+  if (!focusNode || !linkPicker?.target) return;
+  const label = document.getElementById("lp-label")?.value.trim() || null;
+  try {
+    await apiPost("/links", {
+      source_id: focusNode.id,
+      target_id: linkPicker.target.id,
+      label,
+    });
+    closeOverlay();
+    const refreshed = await fetchNode(focusNode.id);
+    focusNode = refreshed;
+    renderStage(false);
+  } catch (e) {
+    alert(`Link failed: ${e.message}`);
+  }
+}
+
+async function deleteLink(linkId) {
+  try {
+    await apiDelete(`/links/${linkId}`);
+    const refreshed = await fetchNode(focusNode.id);
+    focusNode = refreshed;
+    renderStage(false);
+  } catch (e) {
+    alert(`Unlink failed: ${e.message}`);
+  }
+}
+
+// ============================================================
+//  Render: search dropdown
+// ============================================================
+function renderResults() {
+  const inp   = document.getElementById("search-input");
+  const ul    = document.getElementById("search-results");
+  const hint  = document.getElementById("enter-hint");
+  const q     = inp.value;
+
+  hint.style.display = q ? "inline-flex" : "none";
+
+  if (!searchOpen || searchResults.length === 0) { ul.style.display = "none"; return; }
+
+  ul.style.display = "block";
+  ul.innerHTML = searchResults.slice(0, 7).map(node => {
+    const reason = inferReason(node, q);
+    return `
+      <li>
+        <button class="result-btn" data-nid="${node.id}"
+          style="width:100%;display:flex;align-items:baseline;gap:10px;background:transparent;border:none;text-align:left;padding:9px 10px;border-radius:7px;cursor:pointer;color:${C.paper};">
+          <span style="font-family:${mono};font-size:13.5px;">${esc(node.name)}</span>
+          <span style="font-size:11px;color:${C.blue};">${esc(node.type)}</span>
+          ${reason !== null
+            ? `<span style="font-size:11.5px;color:${C.muted};margin-left:auto;font-family:${mono};">${esc(reason)}</span>`
+            : ""}
+        </button>
+      </li>`;
+  }).join("");
+
+  ul.querySelectorAll(".result-btn").forEach(btn =>
+    btn.addEventListener("click", () => summon(+btn.dataset.nid))
+  );
+}
+
+// ============================================================
+//  Render: trail
+// ============================================================
+function renderTrail() {
+  const nav = document.getElementById("trail");
+  if (trail.length === 0) { nav.style.display = "none"; return; }
+  nav.style.display = "flex";
+  nav.innerHTML = trail.map((item, i) => {
+    const isLast = i === trail.length - 1;
+    return `
+      ${i > 0 ? `<span style="color:${C.sep};margin:0 6px;">→</span>` : ""}
+      <button class="trail-crumb" data-tid="${item.id}" data-ti="${i}"
+        style="background:transparent;border:none;cursor:pointer;font-family:${mono};font-size:12.5px;padding:2px;color:${isLast ? C.red : C.muted};">
+        ${esc(item.name)}
+      </button>`;
+  }).join("");
+  nav.querySelectorAll(".trail-crumb").forEach(btn =>
+    btn.addEventListener("click", () => jumpTo(+btn.dataset.tid, +btn.dataset.ti))
+  );
+}
+
+// ============================================================
+//  Render: stage
+// ============================================================
+function renderStage(bloom = true) {
+  const stage = document.getElementById("stage");
+
+  if (!focusNode) {
+    fetch(`${API_BASE}/roots`)
+      .then(r => r.json())
+      .then(data => {
+        stage.innerHTML = buildEmpty(data.roots || []);
+        stage.querySelectorAll(".start-chip").forEach(btn =>
+          btn.addEventListener("click", () => summon(+btn.dataset.nid))
+        );
+      })
+      .catch(() => {
+        stage.innerHTML = buildEmpty([]);
+      });
+    return;
+  }
+
+  const prevId = trail.length >= 2 ? trail[trail.length - 2].id : null;
+  const placed = layoutNeighbours(focusNode.neighbours || [], prevId);
+  stage.innerHTML = `
+    <div style="display:flex;gap:18px;align-items:stretch;flex-wrap:wrap;">
+      ${buildSVG(placed, bloom)}
+      ${buildSheet()}
+    </div>`;
+
+  // SVG cluster: click/keyboard to navigate
+  stage.querySelectorAll(".nb-group").forEach(g => {
+    g.addEventListener("click", () => summon(+g.dataset.nid));
+    g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") summon(+g.dataset.nid); });
+  });
+  // Sheet: navigate via neighbour name buttons
+  stage.querySelectorAll(".sheet-nb-nav").forEach(b =>
+    b.addEventListener("click", () => summon(+b.dataset.nid))
+  );
+  // Sheet: unlink buttons
+  stage.querySelectorAll(".sheet-unlink").forEach(b =>
+    b.addEventListener("click", () => deleteLink(+b.dataset.lid))
+  );
+  // Sheet: edit current node
+  stage.querySelectorAll(".sheet-edit-btn").forEach(b =>
+    b.addEventListener("click", () => openEditor(focusNode))
+  );
+  // Sheet: open link picker
+  stage.querySelectorAll(".sheet-add-link-btn").forEach(b =>
+    b.addEventListener("click", openLinkPicker)
+  );
+}
+
+// ============================================================
+//  Build helpers (return HTML strings)
+// ============================================================
+function buildEmpty(roots = []) {
+  const chipsHtml = roots.length === 0
+    ? `<p style="font-size:13px;color:#555;font-family:${mono};margin-top:16px;">Nothing yet — hit <span style="color:${C.red};">+ New</span> to add your first thing.</p>`
+    : `<div style="display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap;">
+        ${roots.map(r => `
+          <button class="start-chip" data-nid="${r.id}"
+            style="${glass}border-radius:999px;padding:8px 18px;font-family:${mono};font-size:13px;cursor:pointer;color:#f0ede8;">
+            ${esc(r.name)}
+          </button>`).join("")}
+       </div>`;
+  return `
+    <div style="text-align:center;padding:90px 0 110px;background:radial-gradient(ellipse 60% 40% at 50% 0%, rgba(192,57,43,0.07) 0%, transparent 70%);">
+      <p style="font-family:${mono};font-size:22px;color:#f0ede8;margin:0;letter-spacing:0.02em;">
+        <span style="color:${C.red};">✦</span> Summon something.
+      </p>
+      ${roots.length > 0 ? `<p style="color:#7a7a7a;font-size:13.5px;margin-top:10px;">Type a word above, or start here:</p>` : ""}
+      ${chipsHtml}
+    </div>`;
+}
+
+function buildSVG(placed, bloom) {
+  const edges = placed.map(p => {
+    const lx  = VB.cx + (p.x - VB.cx) * 0.56;
+    const ly  = VB.cy + (p.y - VB.cy) * 0.56;
+    const dir = p.direction;
+    const lbl = p.link.label || "";
+    return `
+      <g>
+        <line x1="${VB.cx}" y1="${VB.cy}" x2="${p.x}" y2="${p.y}"
+              stroke="${EDGE_COLOR}" stroke-opacity="0.35" stroke-width="1.5"/>
+        <text x="${lx}" y="${ly}" text-anchor="middle"
+              style="font-family:${mono};font-size:10.5px;letter-spacing:0.02em;" fill="${EDGE_COLOR}">
+          ${dir === "in" ? "← " : ""}${esc(lbl)}${dir === "out" ? " →" : ""}
+        </text>
+      </g>`;
+  }).join("");
+
+  const nbs = placed.map(p => {
+    return `
+      <g class="nb-group" data-nid="${p.node.id}" tabindex="0" role="button"
+         aria-label="Move to ${esc(p.node.name)}" style="cursor:pointer;">
+        <rect x="${p.x - 76}" y="${p.y - 24}" width="152" height="48" rx="10"
+              fill="rgba(255,255,255,0.04)" stroke="${EDGE_COLOR}" stroke-opacity="0.55" stroke-width="1.5"/>
+        <text x="${p.x}" y="${p.y - 3}" text-anchor="middle"
+              style="font-family:${mono};font-size:12.5px;" fill="${C.paper}">
+          ${esc(trunc(p.node.name, 17))}
+        </text>
+        <text x="${p.x}" y="${p.y + 13}" text-anchor="middle"
+              style="font-family:${sans};font-size:10px;letter-spacing:0.04em;" fill="${C.muted}">
+          ${esc(p.node.type)}
+        </text>
+      </g>`;
+  }).join("");
+
+  return `
+    <svg viewBox="0 0 ${VB.w} ${VB.h}"
+         style="width:100%;height:auto;display:block;flex:1 1 400px;min-width:0;"
+         role="img" aria-label="Cluster around ${esc(focusNode.name)}">
+      <defs>
+        <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+          <stop offset="0%"   stop-color="${C.red}" stop-opacity="0.18"/>
+          <stop offset="100%" stop-color="${C.red}" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      <g class="${bloom ? "bloom" : ""}" style="transform-origin:${VB.cx}px ${VB.cy}px;">
+        ${edges}
+        <circle cx="${VB.cx}" cy="${VB.cy}" r="118" fill="url(#halo)"/>
+        <g>
+          <circle cx="${VB.cx}" cy="${VB.cy}" r="58"
+                  fill="rgba(12,12,12,0.85)" stroke="${C.red}" stroke-width="2"/>
+          <text x="${VB.cx}" y="${VB.cy - 4}" text-anchor="middle"
+                style="font-family:${mono};font-size:15px;font-weight:600;" fill="${C.paper}">
+            ${esc(trunc(focusNode.name, 14))}
+          </text>
+          <text x="${VB.cx}" y="${VB.cy + 15}" text-anchor="middle"
+                style="font-family:${mono};font-size:10.5px;letter-spacing:0.08em;" fill="${C.blue}">
+            ${esc(focusNode.type)}
+          </text>
+        </g>
+        ${nbs}
+      </g>
+    </svg>`;
+}
+
+function buildSheet() {
+  const props  = Object.entries(focusNode.properties || {});
+  const nbs    = focusNode.neighbours || [];
+
+  const propsHtml = props.length === 0
+    ? `<p style="font-size:12px;color:${C.muted};font-family:${mono};padding:4px 0;">no properties</p>`
+    : props.map(([k, v]) => `
+        <div style="display:flex;gap:12px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+          <dt style="font-family:${mono};font-size:10px;color:${C.amber};text-transform:uppercase;letter-spacing:0.06em;width:88px;flex-shrink:0;padding-top:2px;">${esc(k)}</dt>
+          <dd style="margin:0;font-size:12.5px;color:${C.paper};word-break:break-word;">${esc(v)}</dd>
+        </div>`).join("");
+
+  const linksHtml = nbs.map(nb => {
+    const dir = nb.direction === "out" ? "→" : "←";
+    return `
+      <div style="display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+        <span style="color:${EDGE_COLOR};font-size:11px;flex-shrink:0;width:12px;">${dir}</span>
+        <span style="font-family:${mono};font-size:10px;color:${C.muted};flex-shrink:0;min-width:60px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(nb.link.label || "")}</span>
+        <button class="sheet-nb-nav" data-nid="${nb.node.id}"
+          style="flex:1;background:transparent;border:none;cursor:pointer;text-align:left;padding:0;display:flex;align-items:baseline;gap:5px;min-width:0;">
+          <span style="font-family:${mono};font-size:12px;color:${C.paper};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(nb.node.name)}</span>
+          <span style="font-size:9.5px;color:${C.blue};flex-shrink:0;">${esc(nb.node.type)}</span>
+        </button>
+        <button class="sheet-unlink" data-lid="${nb.link.id}" title="Remove link"
+          style="background:transparent;border:none;cursor:pointer;color:${C.muted};font-size:15px;line-height:1;padding:0 2px;flex-shrink:0;opacity:0.6;">×</button>
+      </div>`;
+  }).join("");
+
+  return `
+    <aside style="flex:1 1 240px;min-width:230px;${glass}border-radius:12px;padding:18px;align-self:flex-start;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:12px;margin-bottom:12px;">
+        <div>
+          <div style="font-family:${mono};font-size:15px;color:${C.paper};">${esc(focusNode.name)}</div>
+          <div style="font-size:11px;color:${C.blue};letter-spacing:0.07em;margin-top:3px;text-transform:uppercase;">${esc(focusNode.type)}</div>
+        </div>
+        <button class="sheet-edit-btn"
+          style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:6px;padding:4px 10px;color:${C.muted};font-family:${mono};font-size:11px;cursor:pointer;flex-shrink:0;margin-top:2px;">
+          Edit
+        </button>
+      </div>
+
+      <dl style="margin:0 0 14px;">
+        ${propsHtml}
+      </dl>
+
+      <div style="font-family:${mono};font-size:10px;color:${C.muted};text-transform:uppercase;letter-spacing:0.07em;margin-bottom:7px;">
+        Links <span style="color:${C.sep};">(${nbs.length})</span>
+      </div>
+      <div style="margin-bottom:10px;">
+        ${nbs.length === 0
+          ? `<p style="font-size:11.5px;color:${C.muted};font-family:${mono};">no links yet</p>`
+          : linksHtml}
+      </div>
+
+      <button class="sheet-add-link-btn"
+        style="width:100%;background:transparent;border:1px dashed rgba(255,255,255,0.18);border-radius:6px;padding:6px;color:${C.muted};font-family:${mono};font-size:11px;cursor:pointer;">
+        + Add link
+      </button>
+    </aside>`;
+}
+
+// ============================================================
+//  Wire up search input (always in DOM)
+// ============================================================
+(function () {
+  // ---- new node button ----
+  document.getElementById("new-node-btn").addEventListener("click", () => openEditor(null));
+
+  // ---- home button ----
+  document.getElementById("home-btn").addEventListener("click", () => {
+    focusNode   = null;
+    lastFocusId = null;
+    trail       = [];
+    searchOpen  = false;
+    searchResults = [];
+    document.getElementById("search-input").value = "";
+    saveSession();
+    renderResults();
+    renderTrail();
+    renderStage(false);
+  });
+
+  const inp = document.getElementById("search-input");
+
+  inp.addEventListener("input", e => {
+    searchOpen = true;
+    scheduleSearch(e.target.value);
+  });
+
+  inp.addEventListener("focus", () => {
+    searchOpen = true;
+    if (inp.value) renderResults();
+  });
+
+  inp.addEventListener("keydown", e => {
+    if (e.key === "Enter" && searchResults.length > 0) {
+      summon(searchResults[0].id);
+    } else if (e.key === "Escape") {
+      searchOpen = false;
+      renderResults();
+    }
+  });
+
+  // Close dropdown on outside click
+  document.addEventListener("click", e => {
+    if (!e.target.closest("#app header")) {
+      searchOpen = false;
+      renderResults();
+    }
+  });
+
+  // Restore last session, fall back to home screen on any error or missing node.
+  (async () => {
+    try {
+      const res  = await fetch(`${API_BASE}/session`);
+      const data = await res.json();
+      if (data.focus_id) {
+        const node = await fetchNode(data.focus_id);
+        focusNode   = node;
+        lastFocusId = node.id;
+        trail       = Array.isArray(data.trail) && data.trail.length > 0
+                        ? data.trail
+                        : [{ id: node.id, name: node.name }];
+        renderTrail();
+        renderStage(false);
+        return;
+      }
+    } catch { /* fall through */ }
+    renderStage(false);
+  })();
+})();
+</script>
+</body>
+</html>
