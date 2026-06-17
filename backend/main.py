@@ -9,7 +9,7 @@ from db import get_db, init_db
 from ops import (
     create_node, update_node, delete_node,
     get_node_with_neighbours, search_nodes,
-    link_nodes, delete_link, get_type_fields, get_types, get_link_labels,
+    link_nodes, update_link, delete_link, get_type_fields, get_types, get_link_labels,
     session_get, session_put, get_roots, get_graph,
 )
 
@@ -48,6 +48,12 @@ class NodeUpdate(BaseModel):
 class LinkCreate(BaseModel):
     source_id: int
     target_id: int
+    label: Optional[str] = None
+
+
+class LinkUpdate(BaseModel):
+    source_id: Optional[int] = None
+    target_id: Optional[int] = None
     label: Optional[str] = None
 
 
@@ -168,6 +174,15 @@ def link_create(body: LinkCreate):
                 raise HTTPException(status_code=404, detail=f"Node {nid} not found")
         link = link_nodes(conn, body.source_id, body.target_id, "other", body.label)
     return link
+
+
+@app.patch("/links/{link_id}")
+def link_update_route(link_id: int, body: LinkUpdate):
+    with get_db() as conn:
+        updated = update_link(conn, link_id, body.source_id, body.target_id, body.label)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Link not found")
+    return updated
 
 
 @app.delete("/links/{link_id}")

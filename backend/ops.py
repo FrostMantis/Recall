@@ -154,6 +154,23 @@ def delete_node(conn, node_id: int) -> int:
     return link_count
 
 
+def update_link(conn, link_id: int, source_id=None, target_id=None, label=None) -> Optional[dict]:
+    row = conn.execute("SELECT * FROM links WHERE id = %s", (link_id,)).fetchone()
+    if not row:
+        return None
+    new_src = source_id if source_id is not None else row["source_id"]
+    new_tgt = target_id if target_id is not None else row["target_id"]
+    new_lbl = label if label is not None else row["label"]
+    if new_lbl is None:
+        new_lbl = ""
+    conn.execute(
+        "UPDATE links SET source_id = %s, target_id = %s, label = %s WHERE id = %s",
+        (new_src, new_tgt, new_lbl, link_id),
+    )
+    conn.commit()
+    return _normalise_link(conn.execute("SELECT * FROM links WHERE id = %s", (link_id,)).fetchone())
+
+
 def delete_link(conn, link_id: int) -> bool:
     cur = conn.execute("DELETE FROM links WHERE id = %s", (link_id,))
     conn.commit()

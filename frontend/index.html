@@ -169,6 +169,15 @@ function esc(s) {
 
 function trunc(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
+function wrapName(s, limit = 18) {
+  if (s.length <= limit) return [s];
+  // Find nearest word boundary before limit
+  const cut = s.lastIndexOf(" ", limit);
+  if (cut > 0) return [s.slice(0, cut), s.slice(cut + 1)];
+  // No space found — hard-split
+  return [s.slice(0, limit), s.slice(limit)];
+}
+
 function layoutNeighbours(neighbours, prevId = null) {
   const ins  = neighbours.filter(nb => nb.direction === "in");
   const outs = neighbours.filter(nb => nb.direction === "out");
@@ -552,6 +561,9 @@ function renderLinkBackStep() {
   const offStyle = `background:#1c1c1c;border:1px solid #333;color:#888;`;
   const btnBase  = `border-radius:7px;padding:6px 16px;font-family:ui-monospace,monospace;font-size:11.5px;cursor:pointer;`;
 
+  const isChild = editorNode.linkDirection !== "parent";
+  const childStyle  = isChild  ? onStyle : offStyle;
+  const parentStyle = !isChild ? onStyle : offStyle;
   c.innerHTML = `
     <div style="margin-top:18px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.08);">
       <span style="font-family:${mono};font-size:11.5px;color:${C.muted};">
@@ -562,6 +574,12 @@ function renderLinkBackStep() {
         <button id="lb-no"  style="${btnBase}${yes ? offStyle : onStyle}">No</button>
       </div>
       ${yes ? `
+        <div style="display:flex;gap:6px;margin-top:10px;align-items:center;">
+          <span style="font-family:${mono};font-size:10px;color:${C.muted};">New node is a</span>
+          <button id="lb-child"  style="${btnBase}${childStyle}font-size:10.5px;padding:4px 10px;">child of</button>
+          <button id="lb-parent" style="${btnBase}${parentStyle}font-size:10.5px;padding:4px 10px;">parent of</button>
+          <span style="font-family:${mono};font-size:10px;color:${C.muted};">${esc(editorNode.linkTo.name)}</span>
+        </div>
         <label style="display:flex;flex-direction:column;gap:5px;margin-top:12px;">
           <span style="font-family:${mono};font-size:10px;color:${C.amber};text-transform:uppercase;letter-spacing:0.07em;">Label</span>
           <input id="lb-label" value="${esc(editorNode.linkLabel || "")}" placeholder="e.g. runs on, backup of…"
@@ -574,6 +592,8 @@ function renderLinkBackStep() {
   document.getElementById("lb-yes").onclick = () => { editorNode.linkYes = true;  renderLinkBackStep(); };
   document.getElementById("lb-no").onclick  = () => { editorNode.linkYes = false; renderLinkBackStep(); };
   if (yes) {
+    document.getElementById("lb-child")?.addEventListener("click", () => { editorNode.linkDirection = "child"; renderLinkBackStep(); });
+    document.getElementById("lb-parent")?.addEventListener("click", () => { editorNode.linkDirection = "parent"; renderLinkBackStep(); });
     const lbl = document.getElementById("lb-label");
     lbl.oninput = e => { editorNode.linkLabel = e.target.value; };
     lbl.focus();
@@ -622,7 +642,10 @@ async function saveEditor() {
       // Link the new node back to the node it was created from, if requested.
       if (editorNode.linkTo && editorNode.linkYes) {
         const label = (editorNode.linkLabel || "").trim() || null;
-        await apiPost("/links", { source_id: node.id, target_id: editorNode.linkTo.id, label });
+        const isChild = editorNode.linkDirection !== "parent";
+        const src = isChild ? editorNode.linkTo.id : node.id;
+        const tgt = isChild ? node.id : editorNode.linkTo.id;
+        await apiPost("/links", { source_id: src, target_id: tgt, label });
       }
     } else {
       const existing = editorNode.node.properties || {};
@@ -790,6 +813,30 @@ async function deleteLink(linkId) {
   }
 }
 
+async function flipLink(linkId) {
+  const nb = (focusNode.neighbours || []).find(n => n.link.id === linkId);
+  if (!nb) return;
+  try {
+    await apiPatch(`/links/${linkId}`, { source_id: nb.link.target_id, target_id: nb.link.source_id });
+    const refreshed = await fetchNode(focusNode.id);
+    focusNode = refreshed;
+    renderStage(false);
+  } catch (e) {
+    alert(`Flip failed: ${e.message}`);
+  }
+}
+
+async function updateLinkLabel(linkId, label) {
+  try {
+    await apiPatch(`/links/${linkId}`, { label: label || "" });
+    const refreshed = await fetchNode(focusNode.id);
+    focusNode = refreshed;
+    renderStage(false);
+  } catch (e) {
+    alert(`Label update failed: ${e.message}`);
+  }
+}
+
 // ============================================================
 //  Render: search dropdown
 // ============================================================
@@ -890,6 +937,19 @@ function renderStage(bloom = true) {
   stage.querySelectorAll(".sheet-unlink").forEach(b =>
     b.addEventListener("click", () => deleteLink(+b.dataset.lid))
   );
+  // Sheet: flip direction buttons
+  stage.querySelectorAll(".sheet-flip").forEach(b =>
+    b.addEventListener("click", () => flipLink(+b.dataset.lid))
+  );
+  // Sheet: label edit — commit on blur or Enter
+  stage.querySelectorAll(".sheet-link-label").forEach(inp => {
+    const lid = +inp.dataset.lid;
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
+    inp.addEventListener("blur", () => {
+      const nb = (focusNode.neighbours || []).find(n => n.link.id === lid);
+      if (nb && inp.value !== (nb.link.label || "")) updateLinkLabel(lid, inp.value);
+    });
+  });
   // Sheet: edit current node
   stage.querySelectorAll(".sheet-edit-btn").forEach(b =>
     b.addEventListener("click", () => openEditor(focusNode))
@@ -925,40 +985,86 @@ function buildEmpty(roots = []) {
 
 function buildSVG(placed, bloom) {
   const edges = placed.map(p => {
-    const lx  = VB.cx + (p.x - VB.cx) * 0.56;
-    const ly  = VB.cy + (p.y - VB.cy) * 0.56;
     const dir = p.direction;
     const lbl = p.link.label || "";
     const edgeColor = dir === "in" ? C.slate : C.red;
+    // midpoint for arrowhead and label
+    const mx = (VB.cx + p.x) / 2, my = (VB.cy + p.y) / 2;
+    const lx = VB.cx + (p.x - VB.cx) * 0.56, ly = VB.cy + (p.y - VB.cy) * 0.56;
+    // unit vector along line
+    const dx = p.x - VB.cx, dy = p.y - VB.cy;
+    const len = Math.sqrt(dx*dx + dy*dy) || 1;
+    const ux = dx/len, uy = dy/len;
+    // "out": arrow points center→child (positive direction)
+    // "in":  arrow points parent→center (negative direction)
+    const sign = dir === "out" ? 1 : -1;
+    const S = 7;
+    const tx = mx + sign*ux*S, ty = my + sign*uy*S;
+    const b1x = mx - sign*ux*(S*0.5) + (-uy)*(S*0.5), b1y = my - sign*uy*(S*0.5) + ux*(S*0.5);
+    const b2x = mx - sign*ux*(S*0.5) - (-uy)*(S*0.5), b2y = my - sign*uy*(S*0.5) - ux*(S*0.5);
     return `
       <g>
         <line x1="${VB.cx}" y1="${VB.cy}" x2="${p.x}" y2="${p.y}"
               stroke="${edgeColor}" stroke-opacity="0.35" stroke-width="1.5"/>
-        <text x="${lx}" y="${ly}" text-anchor="middle"
+        <polygon points="${tx},${ty} ${b1x},${b1y} ${b2x},${b2y}"
+                 fill="${edgeColor}" fill-opacity="0.65"/>
+        ${lbl ? `<text x="${lx}" y="${ly}" text-anchor="middle"
               style="font-family:${mono};font-size:10.5px;letter-spacing:0.02em;" fill="${edgeColor}">
-          ${dir === "in" ? "← " : ""}${esc(lbl)}${dir === "out" ? " →" : ""}
-        </text>
+          ${esc(lbl)}
+        </text>` : ""}
       </g>`;
   }).join("");
 
   const nbs = placed.map(p => {
     const nodeColor = p.direction === "in" ? C.slate : C.red;
+    const lines = wrapName(p.node.name, 18);
+    const twoLine = lines.length > 1;
+    const boxH = twoLine ? 62 : 48;
+    const nameY = twoLine ? p.y - 11 : p.y - 3;
+    const typeY = twoLine ? p.y + 21 : p.y + 13;
+    const nameText = twoLine
+      ? `<tspan x="${p.x}" dy="0">${esc(lines[0])}</tspan><tspan x="${p.x}" dy="15">${esc(lines[1])}</tspan>`
+      : esc(lines[0]);
     return `
       <g class="nb-group" data-nid="${p.node.id}" tabindex="0" role="button"
          aria-label="Move to ${esc(p.node.name)}" style="cursor:pointer;">
         <title>${esc(p.node.name)}</title>
-        <rect x="${p.x - 76}" y="${p.y - 24}" width="152" height="48" rx="10"
+        <rect x="${p.x - 76}" y="${p.y - boxH / 2}" width="152" height="${boxH}" rx="10"
               fill="rgba(255,255,255,0.04)" stroke="${nodeColor}" stroke-opacity="0.55" stroke-width="1.5"/>
-        <text x="${p.x}" y="${p.y - 3}" text-anchor="middle"
+        <text x="${p.x}" y="${nameY}" text-anchor="middle"
               style="font-family:${mono};font-size:12.5px;" fill="${C.paper}">
-          ${esc(trunc(p.node.name, 22))}
+          ${nameText}
         </text>
-        <text x="${p.x}" y="${p.y + 13}" text-anchor="middle"
+        <text x="${p.x}" y="${typeY}" text-anchor="middle"
               style="font-family:${sans};font-size:10px;letter-spacing:0.04em;" fill="${C.muted}">
           ${esc(p.node.type)}
         </text>
       </g>`;
   }).join("");
+
+  const CN_W       = 220;
+  const CN_RX      = 12;
+  const CN_PAD_V   = 14;
+  const CN_NAME_LH = 17;
+  const CN_TYPE_LH = 14;
+  const CN_GAP     = 8;
+
+  const cnNameLines = wrapName(focusNode.name, 22);
+  const cnTypeLines = wrapName(focusNode.type, 14);
+
+  const cnBoxH = CN_PAD_V + cnNameLines.length * CN_NAME_LH + CN_GAP
+               + cnTypeLines.length * CN_TYPE_LH + CN_PAD_V;
+  const cnBoxX = VB.cx - CN_W / 2;
+  const cnBoxY = VB.cy - cnBoxH / 2;
+  const cnNameY = cnBoxY + CN_PAD_V + CN_NAME_LH;
+  const cnTypeY = cnBoxY + CN_PAD_V + cnNameLines.length * CN_NAME_LH + CN_GAP + CN_TYPE_LH;
+
+  const cnNameText = cnNameLines.map((line, i) =>
+    `<tspan x="${VB.cx}"${i === 0 ? "" : ` dy="${CN_NAME_LH}"`}>${esc(line)}</tspan>`
+  ).join("");
+  const cnTypeText = cnTypeLines.map((line, i) =>
+    `<tspan x="${VB.cx}"${i === 0 ? "" : ` dy="${CN_TYPE_LH}"`}>${esc(line)}</tspan>`
+  ).join("");
 
   return `
     <svg id="cluster-svg" viewBox="0 0 ${VB.w} ${VB.h}"
@@ -969,6 +1075,7 @@ function buildSVG(placed, bloom) {
           <stop offset="0%"   stop-color="${C.red}" stop-opacity="0.18"/>
           <stop offset="100%" stop-color="${C.red}" stop-opacity="0"/>
         </radialGradient>
+
       </defs>
       <g id="pz-group">
         <g class="${bloom ? "bloom" : ""}" style="transform-origin:${VB.cx}px ${VB.cy}px;">
@@ -976,15 +1083,15 @@ function buildSVG(placed, bloom) {
           <circle cx="${VB.cx}" cy="${VB.cy}" r="118" fill="url(#halo)"/>
           <g>
             <title>${esc(focusNode.name)}</title>
-            <circle cx="${VB.cx}" cy="${VB.cy}" r="58"
-                    fill="rgba(12,12,12,0.85)" stroke="${C.red}" stroke-width="2"/>
-            <text x="${VB.cx}" y="${VB.cy - 4}" text-anchor="middle"
+            <rect x="${cnBoxX}" y="${cnBoxY}" width="${CN_W}" height="${cnBoxH}" rx="${CN_RX}"
+                  fill="rgba(12,12,12,0.92)" stroke="${C.red}" stroke-width="2.5"/>
+            <text x="${VB.cx}" y="${cnNameY}" text-anchor="middle"
                   style="font-family:${mono};font-size:15px;font-weight:600;" fill="${C.paper}">
-              ${esc(trunc(focusNode.name, 18))}
+              ${cnNameText}
             </text>
-            <text x="${VB.cx}" y="${VB.cy + 15}" text-anchor="middle"
+            <text x="${VB.cx}" y="${cnTypeY}" text-anchor="middle"
                   style="font-family:${mono};font-size:10.5px;letter-spacing:0.08em;" fill="${C.blue}">
-              ${esc(focusNode.type)}
+              ${cnTypeText}
             </text>
           </g>
           ${nbs}
@@ -1006,16 +1113,19 @@ function buildSheet() {
         </div>`).join("");
 
   const linksHtml = nbs.map(nb => {
-    const dir = nb.direction === "out" ? "→" : "←";
+    const dirColor = nb.direction === "out" ? C.red : C.slate;
     return `
-      <div style="display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
-        <span style="color:${EDGE_COLOR};font-size:11px;flex-shrink:0;width:12px;">${dir}</span>
-        <span style="font-family:${mono};font-size:10px;color:${C.muted};flex-shrink:0;min-width:60px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(nb.link.label || "")}</span>
+      <div style="display:flex;align-items:center;gap:5px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
         <button class="sheet-nb-nav" data-nid="${nb.node.id}"
           style="flex:1;background:transparent;border:none;cursor:pointer;text-align:left;padding:0;display:flex;align-items:baseline;gap:5px;min-width:0;">
           <span style="font-family:${mono};font-size:12px;color:${C.paper};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(nb.node.name)}</span>
           <span style="font-size:9.5px;color:${C.blue};flex-shrink:0;">${esc(nb.node.type)}</span>
         </button>
+        <input class="sheet-link-label" data-lid="${nb.link.id}" value="${esc(nb.link.label || "")}"
+          placeholder="label" title="Edit label"
+          style="width:64px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:2px 5px;color:${C.muted};font-family:${mono};font-size:10px;outline:none;flex-shrink:0;">
+        <button class="sheet-flip" data-lid="${nb.link.id}" title="Flip direction"
+          style="background:transparent;border:none;cursor:pointer;font-size:13px;line-height:1;padding:0 2px;flex-shrink:0;color:${dirColor};opacity:0.75;">⇄</button>
         <button class="sheet-unlink" data-lid="${nb.link.id}" title="Remove link"
           style="background:transparent;border:none;cursor:pointer;color:${C.muted};font-size:15px;line-height:1;padding:0 2px;flex-shrink:0;opacity:0.6;">×</button>
       </div>`;
