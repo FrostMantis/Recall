@@ -10,7 +10,7 @@ from ops import (
     create_node, update_node, delete_node,
     get_node_with_neighbours, search_nodes,
     link_nodes, delete_link, get_type_fields, get_types, get_link_labels,
-    session_get, session_put, get_roots,
+    session_get, session_put, get_roots, get_graph,
 )
 
 
@@ -75,6 +75,12 @@ def type_fields(type: str):
 
 ROOTS_MIN_LINKS = 2
 ROOTS_LIMIT     = 8
+
+@app.get("/graph")
+def graph():
+    with get_db() as conn:
+        return get_graph(conn)
+
 
 @app.get("/roots")
 def roots():

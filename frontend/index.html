@@ -28,14 +28,19 @@
     .nb-group:focus-visible  { outline: none; }
     .nb-group:focus-visible rect { stroke: #c0392b !important; stroke-opacity: 1 !important; }
 
+
     /* ---- misc ---- */
     /* Override WebKit UA "ButtonText" which makes buttons black on black backgrounds */
     button { color: inherit; -webkit-appearance: none; appearance: none; }
     input::placeholder { color: #666; opacity: .9; }
+    /* Dark-theme native selects — option bg must be opaque or browser ignores it */
+    select { background: #141414; color: #f0ede8; border-color: rgba(255,255,255,0.12); }
+    option { background: #141414; color: #f0ede8; }
     button:focus-visible { outline: 2px solid #c0392b; outline-offset: 2px; border-radius: 8px; }
     .result-btn:hover { background: rgba(255,255,255,0.07) !important; }
     @media (prefers-reduced-motion: reduce) { .bloom { animation: none; } }
   </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 </head>
 <body>
 <div id="app">
@@ -52,6 +57,10 @@
     <button id="new-node-btn" aria-label="Create new node"
       style="font-family:ui-monospace,'SF Mono','JetBrains Mono',Menlo,monospace;font-size:12px;background:rgba(192,57,43,0.15);border:1px solid rgba(192,57,43,0.35);border-radius:7px;padding:6px 12px;color:#c0392b;cursor:pointer;flex-shrink:0;white-space:nowrap;">
       + New
+    </button>
+    <button id="overview-btn" aria-label="Overview — show all nodes as a graph"
+      style="font-family:ui-monospace,'SF Mono','JetBrains Mono',Menlo,monospace;font-size:12px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);border-radius:7px;padding:6px 12px;color:#aaa;cursor:pointer;flex-shrink:0;white-space:nowrap;">
+      Overview
     </button>
     <div style="position:relative;flex:1;display:flex;align-items:center;gap:10px;background:linear-gradient(145deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03));backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%);border:1px solid rgba(255,255,255,0.13);box-shadow:inset 0 1px 0 rgba(255,255,255,0.10),0 4px 24px rgba(0,0,0,0.5);border-radius:10px;padding:10px 12px;">
       <!-- search icon -->
@@ -137,6 +146,16 @@ let editorProps = [];      // [{key, value}] — live rows in the property table
 // link picker state
 let linkPicker  = null;    // null=closed | {target:null|node, q:'', results:[], label:''}
 
+// pan/zoom state
+let pzScale = 1, pzTx = 0, pzTy = 0;
+let pzDragging = false, pzStartX = 0, pzStartY = 0, pzStartTx = 0, pzStartTy = 0;
+let pzDragRect = null;
+
+// overview state
+let overviewActive = false;
+let overviewTypeFilter = "";
+
+
 // ============================================================
 //  Utilities
 // ============================================================
@@ -189,6 +208,64 @@ function inferReason(node, q) {
   if (node.type.toLowerCase().includes(ql)) return `type · ${node.type}`;
   return "linked to match"; // neighbour-name hit
 }
+
+// ============================================================
+//  Pan / zoom
+// ============================================================
+function setPzTransform(svg) {
+  const g = svg.querySelector('#pz-group');
+  if (g) g.setAttribute('transform', `translate(${pzTx},${pzTy}) scale(${pzScale})`);
+}
+
+function resetPanZoom() {
+  pzScale = 1; pzTx = 0; pzTy = 0;
+  const svg = document.getElementById('cluster-svg');
+  if (svg) setPzTransform(svg);
+}
+
+function attachPanZoom(svg) {
+  svg.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const rect = svg.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (VB.w / rect.width);
+    const my = (e.clientY - rect.top)  * (VB.h / rect.height);
+    const s2 = Math.min(Math.max(pzScale * factor, 0.2), 8);
+    pzTx = mx - (mx - pzTx) * s2 / pzScale;
+    pzTy = my - (my - pzTy) * s2 / pzScale;
+    pzScale = s2;
+    setPzTransform(svg);
+  }, { passive: false });
+
+  svg.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    pzDragging = true;
+    pzDragRect  = svg.getBoundingClientRect();
+    pzStartX    = e.clientX;
+    pzStartY    = e.clientY;
+    pzStartTx   = pzTx;
+    pzStartTy   = pzTy;
+    svg.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+}
+
+// Window-level handlers registered once so they don't accumulate across re-renders.
+window.addEventListener('mousemove', e => {
+  if (!pzDragging || !pzDragRect) return;
+  const sx = VB.w / pzDragRect.width;
+  const sy = VB.h / pzDragRect.height;
+  pzTx = pzStartTx + (e.clientX - pzStartX) * sx;
+  pzTy = pzStartTy + (e.clientY - pzStartY) * sy;
+  const svg = document.getElementById('cluster-svg');
+  if (svg) setPzTransform(svg);
+});
+window.addEventListener('mouseup', () => {
+  if (!pzDragging) return;
+  pzDragging = false;
+  const svg = document.getElementById('cluster-svg');
+  if (svg) svg.style.cursor = '';
+});
 
 // ============================================================
 //  API
@@ -284,6 +361,8 @@ async function summon(id) {
   const bloom = lastFocusId !== id;
   focusNode   = node;
   lastFocusId = id;
+  overviewActive = false;
+  resetPanZoom();
 
   // If the target is already in the trail, rewind to that position instead of appending.
   const existingIdx = trail.findIndex(t => t.id === id);
@@ -309,6 +388,8 @@ async function jumpTo(id, i) {
   const node  = await fetchNode(id);
   focusNode   = node;
   lastFocusId = id;
+  overviewActive = false;
+  resetPanZoom();
   saveSession();
   renderTrail();
   renderStage(true);
@@ -788,7 +869,7 @@ function renderStage(bloom = true) {
   const prevId = trail.length >= 2 ? trail[trail.length - 2].id : null;
   const placed = layoutNeighbours(focusNode.neighbours || [], prevId);
   stage.innerHTML = `
-    <div style="display:flex;gap:18px;align-items:stretch;flex-wrap:wrap;">
+    <div style="position:relative;height:calc(100vh - 130px);overflow:hidden;">
       ${buildSVG(placed, bloom)}
       ${buildSheet()}
     </div>`;
@@ -798,6 +879,9 @@ function renderStage(bloom = true) {
     g.addEventListener("click", () => summon(+g.dataset.nid));
     g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") summon(+g.dataset.nid); });
   });
+  // Pan/zoom
+  const clusterSvg = stage.querySelector('#cluster-svg');
+  if (clusterSvg) attachPanZoom(clusterSvg);
   // Sheet: navigate via neighbour name buttons
   stage.querySelectorAll(".sheet-nb-nav").forEach(b =>
     b.addEventListener("click", () => summon(+b.dataset.nid))
@@ -877,8 +961,8 @@ function buildSVG(placed, bloom) {
   }).join("");
 
   return `
-    <svg viewBox="0 0 ${VB.w} ${VB.h}"
-         style="width:100%;height:auto;display:block;flex:1 1 400px;min-width:0;"
+    <svg id="cluster-svg" viewBox="0 0 ${VB.w} ${VB.h}"
+         style="position:absolute;inset:0;width:100%;height:100%;display:block;"
          role="img" aria-label="Cluster around ${esc(focusNode.name)}">
       <defs>
         <radialGradient id="halo" cx="50%" cy="50%" r="50%">
@@ -886,23 +970,25 @@ function buildSVG(placed, bloom) {
           <stop offset="100%" stop-color="${C.red}" stop-opacity="0"/>
         </radialGradient>
       </defs>
-      <g class="${bloom ? "bloom" : ""}" style="transform-origin:${VB.cx}px ${VB.cy}px;">
-        ${edges}
-        <circle cx="${VB.cx}" cy="${VB.cy}" r="118" fill="url(#halo)"/>
-        <g>
-          <title>${esc(focusNode.name)}</title>
-          <circle cx="${VB.cx}" cy="${VB.cy}" r="58"
-                  fill="rgba(12,12,12,0.85)" stroke="${C.red}" stroke-width="2"/>
-          <text x="${VB.cx}" y="${VB.cy - 4}" text-anchor="middle"
-                style="font-family:${mono};font-size:15px;font-weight:600;" fill="${C.paper}">
-            ${esc(trunc(focusNode.name, 18))}
-          </text>
-          <text x="${VB.cx}" y="${VB.cy + 15}" text-anchor="middle"
-                style="font-family:${mono};font-size:10.5px;letter-spacing:0.08em;" fill="${C.blue}">
-            ${esc(focusNode.type)}
-          </text>
+      <g id="pz-group">
+        <g class="${bloom ? "bloom" : ""}" style="transform-origin:${VB.cx}px ${VB.cy}px;">
+          ${edges}
+          <circle cx="${VB.cx}" cy="${VB.cy}" r="118" fill="url(#halo)"/>
+          <g>
+            <title>${esc(focusNode.name)}</title>
+            <circle cx="${VB.cx}" cy="${VB.cy}" r="58"
+                    fill="rgba(12,12,12,0.85)" stroke="${C.red}" stroke-width="2"/>
+            <text x="${VB.cx}" y="${VB.cy - 4}" text-anchor="middle"
+                  style="font-family:${mono};font-size:15px;font-weight:600;" fill="${C.paper}">
+              ${esc(trunc(focusNode.name, 18))}
+            </text>
+            <text x="${VB.cx}" y="${VB.cy + 15}" text-anchor="middle"
+                  style="font-family:${mono};font-size:10.5px;letter-spacing:0.08em;" fill="${C.blue}">
+              ${esc(focusNode.type)}
+            </text>
+          </g>
+          ${nbs}
         </g>
-        ${nbs}
       </g>
     </svg>`;
 }
@@ -936,7 +1022,7 @@ function buildSheet() {
   }).join("");
 
   return `
-    <aside style="flex:1 1 240px;min-width:230px;${glass}border-radius:12px;padding:18px;align-self:flex-start;">
+    <aside style="position:absolute;top:12px;right:12px;width:270px;max-height:calc(100% - 24px);overflow-y:auto;${glass}border-radius:12px;padding:18px;z-index:10;">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:12px;margin-bottom:12px;">
         <div>
           <div style="font-family:${mono};font-size:15px;color:${C.paper};">${esc(focusNode.name)}</div>
@@ -969,19 +1055,179 @@ function buildSheet() {
 }
 
 // ============================================================
+//  Overview
+// ============================================================
+async function renderOverview() {
+  overviewActive = true;
+  const stage = document.getElementById('stage');
+  stage.innerHTML = `
+    <div id="overview-panel">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wrap;">
+        <span style="font-family:${mono};font-size:11px;color:${C.muted};text-transform:uppercase;letter-spacing:0.08em;">Overview</span>
+        <select id="ov-filter"
+          style="background:#141414;border:1px solid rgba(255,255,255,0.18);border-radius:6px;
+                 padding:4px 8px;color:#f0ede8;font-family:${mono};font-size:11px;outline:none;cursor:pointer;">
+          <option value="" style="background:#141414;color:#f0ede8;">all types</option>
+        </select>
+        <span id="ov-count" style="font-family:${mono};font-size:11px;color:${C.muted};"></span>
+      </div>
+      <svg id="ov-svg" style="width:100%;display:block;background:rgba(255,255,255,0.02);border-radius:12px;
+                              border:1px solid rgba(255,255,255,0.06);" height="620"></svg>
+    </div>`;
+
+  fetchTypes().then(types => {
+    const sel = document.getElementById('ov-filter');
+    if (!sel) return;
+    types.forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t.type;
+      opt.textContent = `${t.type} (${t.count})`;
+      opt.style.background = '#141414';
+      opt.style.color = '#f0ede8';
+      if (t.type === overviewTypeFilter) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.onchange = () => { overviewTypeFilter = sel.value; drawOverviewGraph(); };
+  });
+
+  await drawOverviewGraph();
+}
+
+async function drawOverviewGraph() {
+  const svgEl = document.getElementById('ov-svg');
+  if (!svgEl) return;
+
+  let data;
+  try { data = await fetch(`${API_BASE}/graph`).then(r => r.json()); }
+  catch { return; }
+
+  let nodes = data.nodes.map(n => ({ ...n }));
+  let links = data.links.map(l => ({ ...l }));
+
+  if (overviewTypeFilter) {
+    const keep = new Set(nodes.filter(n => n.type === overviewTypeFilter).map(n => n.id));
+    nodes = nodes.filter(n => keep.has(n.id));
+    links = links.filter(l => keep.has(l.source_id) && keep.has(l.target_id));
+  }
+
+  const countEl = document.getElementById('ov-count');
+  if (countEl) countEl.textContent = `${nodes.length} nodes · ${links.length} links`;
+
+  svgEl.innerHTML = '';
+  if (nodes.length === 0) return;
+
+  const W = svgEl.getBoundingClientRect().width || 900;
+  const H = 620;
+  svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  // ── type cluster positions ────────────────────────────────────────────────
+  // Each distinct type gets a fixed anchor on a circle; nodes are pulled toward
+  // their type's anchor so same-type nodes clump together naturally.
+  const typeList = [...new Set(nodes.map(n => n.type))];
+  const clusterR  = Math.min(W, H) * (typeList.length > 1 ? 0.28 : 0);
+  const typeAnchor = {};
+  typeList.forEach((t, i) => {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / typeList.length;
+    typeAnchor[t] = { x: W / 2 + clusterR * Math.cos(a), y: H / 2 + clusterR * Math.sin(a) };
+  });
+
+  const nodeById = new Map(nodes.map(n => [n.id, n]));
+  const simLinks = links
+    .filter(l => nodeById.has(l.source_id) && nodeById.has(l.target_id))
+    .map(l => ({ source: l.source_id, target: l.target_id }));
+
+  const maxLc = Math.max(...nodes.map(n => n.link_count), 1);
+  const rScale = d3.scaleSqrt().domain([0, maxLc]).range([5, 18]);
+
+  const clusterStrength = typeList.length > 1 ? 0.14 : 0;
+  const sim = d3.forceSimulation(nodes)
+    .force('link',     d3.forceLink(simLinks).id(d => d.id).distance(55).strength(0.65))
+    .force('charge',   d3.forceManyBody().strength(-70))
+    .force('center',   d3.forceCenter(W / 2, H / 2).strength(0.04))
+    .force('collide',  d3.forceCollide(d => rScale(d.link_count) + 12))
+    .force('clusterX', d3.forceX(d => typeAnchor[d.type].x).strength(clusterStrength))
+    .force('clusterY', d3.forceY(d => typeAnchor[d.type].y).strength(clusterStrength));
+
+  // ── D3 zoom / pan ─────────────────────────────────────────────────────────
+  const svg = d3.select(svgEl);
+  const container = svg.append('g').attr('class', 'ov-container');
+
+  const zoom = d3.zoom()
+    .scaleExtent([0.05, 10])
+    .on('zoom', e => container.attr('transform', e.transform));
+  svg.call(zoom)
+     .on('dblclick.zoom', null); // disable double-click zoom (we use it for summon)
+
+  const linkG  = container.append('g');
+  const nodeG  = container.append('g');
+  const labelG = container.append('g');
+
+  const linkEls = linkG.selectAll('line').data(simLinks).join('line')
+    .attr('stroke', '#2a2a2a').attr('stroke-width', 1).attr('stroke-opacity', 0.9);
+
+  const nodeEls = nodeG.selectAll('circle').data(nodes).join('circle')
+    .attr('r', d => rScale(d.link_count))
+    .attr('fill', 'rgba(10,10,10,0.95)')
+    .attr('stroke', '#3a3a3a').attr('stroke-width', 1.5)
+    .style('cursor', 'pointer')
+    .on('mouseover', function() { d3.select(this).attr('stroke', C.red).attr('stroke-width', 2.5); })
+    .on('mouseout',  function() { d3.select(this).attr('stroke', '#3a3a3a').attr('stroke-width', 1.5); })
+    .on('click', (e, d) => { e.stopPropagation(); overviewActive = false; summon(d.id); });
+
+  const labelEls = labelG.selectAll('text').data(nodes).join('text')
+    .text(d => trunc(d.name, 20))
+    .attr('text-anchor', 'middle').attr('dy', '0.35em')
+    .style('font-family', mono).style('font-size', '9px')
+    .style('fill', '#666').style('pointer-events', 'none').style('user-select', 'none');
+
+  sim.on('tick', () => {
+    linkEls.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+           .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    nodeEls.attr('cx', d => d.x).attr('cy', d => d.y);
+    labelEls.attr('x', d => d.x).attr('y', d => d.y);
+  });
+
+  // After the simulation settles, fit the view to show all nodes
+  sim.on('end', () => {
+    const xs = nodes.map(n => n.x), ys = nodes.map(n => n.y);
+    const pad = 40;
+    const x0 = Math.min(...xs) - pad, y0 = Math.min(...ys) - pad;
+    const x1 = Math.max(...xs) + pad, y1 = Math.max(...ys) + pad;
+    svg.transition().duration(400).call(
+      zoom.transform,
+      d3.zoomIdentity
+        .translate(W / 2, H / 2)
+        .scale(Math.min(8, 0.9 / Math.max((x1 - x0) / W, (y1 - y0) / H)))
+        .translate(-(x0 + x1) / 2, -(y0 + y1) / 2)
+    );
+  });
+}
+
+// ============================================================
 //  Wire up search input (always in DOM)
 // ============================================================
 (function () {
   // ---- new node button ----
   document.getElementById("new-node-btn").addEventListener("click", () => openEditor(null));
 
+  // ---- overview button ----
+  document.getElementById("overview-btn").addEventListener("click", () => {
+    if (overviewActive) {
+      overviewActive = false;
+      renderStage(false);
+    } else {
+      renderOverview();
+    }
+  });
+
   // ---- home button ----
   document.getElementById("home-btn").addEventListener("click", () => {
-    focusNode   = null;
-    lastFocusId = null;
-    trail       = [];
-    searchOpen  = false;
-    searchResults = [];
+    focusNode      = null;
+    lastFocusId    = null;
+    trail          = [];
+    searchOpen     = false;
+    searchResults  = [];
+    overviewActive = false;
     document.getElementById("search-input").value = "";
     saveSession();
     renderResults();

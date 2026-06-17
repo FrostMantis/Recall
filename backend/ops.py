@@ -261,6 +261,24 @@ def session_put(conn, focus_id: Optional[int], trail: list) -> None:
     conn.commit()
 
 
+def get_graph(conn) -> dict:
+    nodes = conn.execute(
+        """
+        SELECT n.id, n.name, n.type, COUNT(l.id) AS link_count
+        FROM nodes n
+        LEFT JOIN links l ON l.source_id = n.id OR l.target_id = n.id
+        GROUP BY n.id, n.name, n.type
+        """
+    ).fetchall()
+    links = conn.execute(
+        "SELECT source_id, target_id, label FROM links"
+    ).fetchall()
+    return {
+        "nodes": [{"id": r["id"], "name": r["name"], "type": r["type"], "link_count": r["link_count"]} for r in nodes],
+        "links": [{"source_id": r["source_id"], "target_id": r["target_id"], "label": r["label"]} for r in links],
+    }
+
+
 def get_roots(conn, min_links: int, limit: int) -> list:
     rows = conn.execute(
         """
