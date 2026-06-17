@@ -151,17 +151,33 @@ function esc(s) {
 function trunc(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
 function layoutNeighbours(neighbours, prevId = null) {
-  // If the user navigated here from a neighbour, pin that neighbour at 12 o'clock (index 0).
-  let sorted = [...neighbours];
-  if (prevId != null) {
-    const pi = sorted.findIndex(nb => nb.node.id === prevId);
-    if (pi > 0) sorted.unshift(...sorted.splice(pi, 1));
+  const ins  = neighbours.filter(nb => nb.direction === "in");
+  const outs = neighbours.filter(nb => nb.direction === "out");
+
+  function placeArc(group, startAngle, arcLength) {
+    const N = group.length;
+    if (N === 0) return [];
+    const step = arcLength / N;
+    return group.map((nb, i) => {
+      const a = startAngle + (i + 0.5) * step;
+      return { ...nb, x: VB.cx + VB.r * Math.cos(a), y: VB.cy + VB.r * Math.sin(a) };
+    });
   }
-  const N = sorted.length;
-  return sorted.map((nb, i) => {
-    const a = -Math.PI / 2 + (i * 2 * Math.PI) / Math.max(N, 1);
-    return { ...nb, x: VB.cx + VB.r * Math.cos(a), y: VB.cy + VB.r * Math.sin(a) };
-  });
+
+  // Fall back to full 360° if one group is empty
+  if (ins.length === 0 || outs.length === 0) {
+    const group = ins.length === 0 ? outs : ins;
+    const N = group.length;
+    return group.map((nb, i) => {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / Math.max(N, 1);
+      return { ...nb, x: VB.cx + VB.r * Math.cos(a), y: VB.cy + VB.r * Math.sin(a) };
+    });
+  }
+
+  return [
+    ...placeArc(ins,  -Math.PI, Math.PI),   // upper semicircle: parents
+    ...placeArc(outs,  0,       Math.PI),   // lower semicircle: children
+  ];
 }
 
 // Best-effort reason text from client side (API doesn't return match kind)
@@ -829,26 +845,29 @@ function buildSVG(placed, bloom) {
     const ly  = VB.cy + (p.y - VB.cy) * 0.56;
     const dir = p.direction;
     const lbl = p.link.label || "";
+    const edgeColor = dir === "in" ? C.slate : C.red;
     return `
       <g>
         <line x1="${VB.cx}" y1="${VB.cy}" x2="${p.x}" y2="${p.y}"
-              stroke="${EDGE_COLOR}" stroke-opacity="0.35" stroke-width="1.5"/>
+              stroke="${edgeColor}" stroke-opacity="0.35" stroke-width="1.5"/>
         <text x="${lx}" y="${ly}" text-anchor="middle"
-              style="font-family:${mono};font-size:10.5px;letter-spacing:0.02em;" fill="${EDGE_COLOR}">
+              style="font-family:${mono};font-size:10.5px;letter-spacing:0.02em;" fill="${edgeColor}">
           ${dir === "in" ? "← " : ""}${esc(lbl)}${dir === "out" ? " →" : ""}
         </text>
       </g>`;
   }).join("");
 
   const nbs = placed.map(p => {
+    const nodeColor = p.direction === "in" ? C.slate : C.red;
     return `
       <g class="nb-group" data-nid="${p.node.id}" tabindex="0" role="button"
          aria-label="Move to ${esc(p.node.name)}" style="cursor:pointer;">
+        <title>${esc(p.node.name)}</title>
         <rect x="${p.x - 76}" y="${p.y - 24}" width="152" height="48" rx="10"
-              fill="rgba(255,255,255,0.04)" stroke="${EDGE_COLOR}" stroke-opacity="0.55" stroke-width="1.5"/>
+              fill="rgba(255,255,255,0.04)" stroke="${nodeColor}" stroke-opacity="0.55" stroke-width="1.5"/>
         <text x="${p.x}" y="${p.y - 3}" text-anchor="middle"
               style="font-family:${mono};font-size:12.5px;" fill="${C.paper}">
-          ${esc(trunc(p.node.name, 17))}
+          ${esc(trunc(p.node.name, 22))}
         </text>
         <text x="${p.x}" y="${p.y + 13}" text-anchor="middle"
               style="font-family:${sans};font-size:10px;letter-spacing:0.04em;" fill="${C.muted}">
@@ -871,11 +890,12 @@ function buildSVG(placed, bloom) {
         ${edges}
         <circle cx="${VB.cx}" cy="${VB.cy}" r="118" fill="url(#halo)"/>
         <g>
+          <title>${esc(focusNode.name)}</title>
           <circle cx="${VB.cx}" cy="${VB.cy}" r="58"
                   fill="rgba(12,12,12,0.85)" stroke="${C.red}" stroke-width="2"/>
           <text x="${VB.cx}" y="${VB.cy - 4}" text-anchor="middle"
                 style="font-family:${mono};font-size:15px;font-weight:600;" fill="${C.paper}">
-            ${esc(trunc(focusNode.name, 14))}
+            ${esc(trunc(focusNode.name, 18))}
           </text>
           <text x="${VB.cx}" y="${VB.cy + 15}" text-anchor="middle"
                 style="font-family:${mono};font-size:10.5px;letter-spacing:0.08em;" fill="${C.blue}">
