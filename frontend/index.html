@@ -155,6 +155,9 @@ let pzDragRect = null;
 let overviewActive = false;
 let overviewTypeFilter = "";
 
+// cluster depth: number of rings shown (1 = direct neighbours only). Default 2.
+let clusterDepth = 2;
+
 
 // ============================================================
 //  Utilities
@@ -170,42 +173,118 @@ function esc(s) {
 function trunc(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
 function wrapName(s, limit = 18) {
+  s = String(s ?? "");
   if (s.length <= limit) return [s];
-  // Find nearest word boundary before limit
+  // Only ever break at a space — never split mid-word.
   const cut = s.lastIndexOf(" ", limit);
   if (cut > 0) return [s.slice(0, cut), s.slice(cut + 1)];
-  // No space found — hard-split
-  return [s.slice(0, limit), s.slice(limit)];
+  // Single word longer than the line: let it overflow rather than cutting it.
+  return [s];
 }
 
-function layoutNeighbours(neighbours, prevId = null) {
-  const ins  = neighbours.filter(nb => nb.direction === "in");
-  const outs = neighbours.filter(nb => nb.direction === "out");
+// ---- text measurement (for content-sized node boxes) ----
+const _measureCtx = document.createElement("canvas").getContext("2d");
+function textWidth(text, fontPx, family) {
+  _measureCtx.font = `${fontPx}px ${family}`;
+  return _measureCtx.measureText(String(text ?? "")).width;
+}
 
-  function placeArc(group, startAngle, arcLength) {
-    const N = group.length;
-    if (N === 0) return [];
-    const step = arcLength / N;
-    return group.map((nb, i) => {
-      const a = startAngle + (i + 0.5) * step;
-      return { ...nb, x: VB.cx + VB.r * Math.cos(a), y: VB.cy + VB.r * Math.sin(a) };
-    });
-  }
+// Box-style presets per ring. Ring 2/3 are smaller + tighter so the outer
+// rings read as secondary.
+const RING1_BOX = { nameLimit: 20, nameFont: 12.5, typeFont: 10, nameLH: 15, typeLH: 13,
+                    padX: 14, padTop: 11, padBottom: 11, gap: 5, minW: 110, maxW: 240 };
+const RING2_BOX = { nameLimit: 18, nameFont: 10.5, typeFont: 8.5, nameLH: 12.5, typeLH: 10.5,
+                    padX: 11, padTop: 8, padBottom: 8, gap: 4, minW: 78, maxW: 180 };
 
-  // Fall back to full 360° if one group is empty
+// Measure a neighbour's rendered box from its wrapped text.
+function nodeBox(node, o) {
+  const lines = wrapName(node.name, o.nameLimit);
+  const nameW = Math.max(...lines.map(l => textWidth(l, o.nameFont, mono)));
+  const typeW = textWidth(node.type, o.typeFont, sans);
+  let w = Math.max(nameW, typeW) + o.padX * 2;
+  w = Math.max(o.minW, Math.min(o.maxW, w));
+  const h = o.padTop + lines.length * o.nameLH + o.gap + o.typeLH + o.padBottom;
+  return { lines, w, h, o };
+}
+
+// Angular slice a box needs at angle θ on a ring of radius r — its real
+// tangential footprint (width dominates near the poles, height near the
+// sides) plus a constant minimum gap.
+function sliceFor(box, theta, r, gap) {
+  const projHalf = (box.w / 2) * Math.abs(Math.sin(theta))
+                 + (box.h / 2) * Math.abs(Math.cos(theta));
+  return (2 * projHalf + gap) / r;
+}
+
+function totalSlices(group, startAngle, r, gap) {
+  let a = startAngle;
+  for (const g of group) a += sliceFor(g.box, a, r, gap);
+  return a - startAngle;
+}
+
+// Place boxes sequentially from startAngle, each claiming room ∝ its own size.
+// Coordinates are relative to the ring centre (added later, once the viewBox
+// has been sized) so layout doesn't depend on VB.
+function placeSequential(group, startAngle, r, gap) {
+  let a = startAngle;
+  return group.map(g => {
+    const slice = sliceFor(g.box, a, r, gap);
+    const center = a + slice / 2;
+    a += slice;
+    return { ...g, angle: center, rx: r * Math.cos(center), ry: r * Math.sin(center) };
+  });
+}
+
+// Distribute a group across [startAngle, startAngle+arcLength], centred, sized.
+function placeArc(group, startAngle, arcLength, r, gap) {
+  if (group.length === 0) return [];
+  const total = totalSlices(group, startAngle, r, gap);
+  const pad = total < arcLength ? (arcLength - total) / 2 : 0;
+  return placeSequential(group, startAngle + pad, r, gap);
+}
+
+// Ring 1: parents on the upper semicircle, children on the lower, each half
+// distributed by real box size so big boxes never crowd their neighbours.
+function layoutRing1(neighbours, r, gap) {
+  const withBox = neighbours.map(nb => ({ ...nb, box: nodeBox(nb.node, RING1_BOX) }));
+  const ins  = withBox.filter(nb => nb.direction === "in");
+  const outs = withBox.filter(nb => nb.direction === "out");
+  let placed;
   if (ins.length === 0 || outs.length === 0) {
     const group = ins.length === 0 ? outs : ins;
-    const N = group.length;
-    return group.map((nb, i) => {
-      const a = -Math.PI / 2 + (i * 2 * Math.PI) / Math.max(N, 1);
-      return { ...nb, x: VB.cx + VB.r * Math.cos(a), y: VB.cy + VB.r * Math.sin(a) };
-    });
+    placed = placeArc(group, -Math.PI / 2, 2 * Math.PI, r, gap);
+  } else {
+    placed = [
+      ...placeArc(ins,  -Math.PI, Math.PI, r, gap),   // upper semicircle: parents
+      ...placeArc(outs,  0,       Math.PI, r, gap),   // lower semicircle: children
+    ];
   }
+  return placed.map(p => ({ ...p, ring: 1 }));
+}
 
-  return [
-    ...placeArc(ins,  -Math.PI, Math.PI),   // upper semicircle: parents
-    ...placeArc(outs,  0,       Math.PI),   // lower semicircle: children
-  ];
+// An outer ring: for each node on the previous ring, fan its not-yet-placed
+// neighbours out around that node's angle at the larger radius. Async because
+// /nodes/{id} only returns one hop, so deeper rings need a fetch per node.
+async function layoutOuterRing(prevRing, placedIds, r, gap) {
+  const byParent = [];
+  for (const p of prevRing) {
+    let detail;
+    try { detail = await fetchNode(p.node.id); } catch { continue; }
+    const kids = [];
+    for (const nb of detail.neighbours || []) {
+      if (placedIds.has(nb.node.id)) continue;   // already shown on an inner ring
+      placedIds.add(nb.node.id);
+      kids.push({ ...nb, box: nodeBox(nb.node, RING2_BOX) });
+    }
+    if (kids.length) byParent.push({ parent: p, kids });
+  }
+  const out = [];
+  for (const { parent, kids } of byParent) {
+    const total  = totalSlices(kids, parent.angle, r, gap);
+    const placed = placeSequential(kids, parent.angle - total / 2, r, gap);
+    for (const k of placed) out.push({ ...k, parent });
+  }
+  return out;
 }
 
 // Best-effort reason text from client side (API doesn't return match kind)
@@ -520,12 +599,17 @@ function renderEditor() {
     const dl = document.getElementById("ed-type-list");
     if (!dl) return; // editor may have closed while the request was in flight
     dl.innerHTML = types.map(t => `<option value="${esc(t.type)}"></option>`).join("");
+    // Create mode: default the type to the most-used existing type (GET /types
+    // is count-descending). Still fully editable; pull in its learned template.
+    const typeInp = document.getElementById("ed-type");
+    if (!isEdit && typeInp && !typeInp.value.trim() && types.length) {
+      typeInp.value = types[0].type;
+      applyTemplate(types[0].type);
+    }
   });
 
   if (!isEdit) {
-    // Create mode: pre-fill from the learned template for the current type,
-    // and refresh suggestions whenever the type changes. Type starts empty,
-    // so no template is applied until a type is actually chosen/typed.
+    // Refresh the learned-template suggestions whenever the type changes.
     const typeInp = document.getElementById("ed-type");
     typeInp.onchange = () => applyTemplate(typeInp.value.trim());
   }
@@ -895,7 +979,7 @@ function renderTrail() {
 // ============================================================
 //  Render: stage
 // ============================================================
-function renderStage(bloom = true) {
+async function renderStage(bloom = true) {
   const stage = document.getElementById("stage");
 
   if (!focusNode) {
@@ -913,13 +997,51 @@ function renderStage(bloom = true) {
     return;
   }
 
-  const prevId = trail.length >= 2 ? trail[trail.length - 2].id : null;
-  const placed = layoutNeighbours(focusNode.neighbours || [], prevId);
+  const capturedId = focusNode.id;
+  const GAP1 = 16, GAP2 = 12;
+  const RAD = [0, 215, 370, 520];  // radius per ring index
+
+  // Ring 1 is synchronous; outer rings each need a fetch per inner node.
+  const ring1 = layoutRing1(focusNode.neighbours || [], RAD[1], GAP1);
+  const placedIds = new Set([focusNode.id, ...ring1.map(p => p.node.id)]);
+  const outer = [];
+  let prev = ring1;
+  for (let ring = 2; ring <= clusterDepth; ring++) {
+    const placed = await layoutOuterRing(prev, placedIds, RAD[ring], GAP2);
+    if (focusNode.id !== capturedId) return;  // user navigated away mid-fetch
+    placed.forEach(p => { p.ring = ring; });
+    outer.push(...placed);
+    if (placed.length === 0) break;           // nothing further out — stop
+    prev = placed;
+  }
+
+  // Size the viewBox to the outermost ring actually populated, then resolve
+  // each node's absolute position from its centre-relative coords.
+  const maxRing = outer.length ? Math.max(...outer.map(p => p.ring)) : 1;
+  const half = RAD[maxRing] + 130;
+  VB.h = 2 * half;
+  VB.w = Math.round(2 * half * 1.3);
+  VB.cx = VB.w / 2;
+  VB.cy = VB.h / 2;
+  VB.r = RAD[1];
+  for (const p of [...ring1, ...outer]) { p.x = VB.cx + p.rx; p.y = VB.cy + p.ry; }
+
   stage.innerHTML = `
     <div style="position:relative;height:calc(100vh - 130px);overflow:hidden;">
-      ${buildSVG(placed, bloom)}
+      ${buildDepthControl()}
+      ${buildSVG(ring1, outer, bloom)}
       ${buildSheet()}
     </div>`;
+
+  // Depth control
+  stage.querySelectorAll(".depth-btn").forEach(b =>
+    b.addEventListener("click", () => {
+      const d = +b.dataset.depth;
+      if (d === clusterDepth) return;
+      clusterDepth = d;
+      renderStage(false);
+    })
+  );
 
   // SVG cluster: click/keyboard to navigate
   stage.querySelectorAll(".nb-group").forEach(g => {
@@ -983,64 +1105,95 @@ function buildEmpty(roots = []) {
     </div>`;
 }
 
-function buildSVG(placed, bloom) {
-  const edges = placed.map(p => {
-    const dir = p.direction;
-    const lbl = p.link.label || "";
-    const edgeColor = dir === "in" ? C.slate : C.red;
-    // midpoint for arrowhead and label
-    const mx = (VB.cx + p.x) / 2, my = (VB.cy + p.y) / 2;
-    const lx = VB.cx + (p.x - VB.cx) * 0.56, ly = VB.cy + (p.y - VB.cy) * 0.56;
-    // unit vector along line
-    const dx = p.x - VB.cx, dy = p.y - VB.cy;
-    const len = Math.sqrt(dx*dx + dy*dy) || 1;
-    const ux = dx/len, uy = dy/len;
-    // "out": arrow points center→child (positive direction)
-    // "in":  arrow points parent→center (negative direction)
-    const sign = dir === "out" ? 1 : -1;
-    const S = 7;
-    const tx = mx + sign*ux*S, ty = my + sign*uy*S;
-    const b1x = mx - sign*ux*(S*0.5) + (-uy)*(S*0.5), b1y = my - sign*uy*(S*0.5) + ux*(S*0.5);
-    const b2x = mx - sign*ux*(S*0.5) - (-uy)*(S*0.5), b2y = my - sign*uy*(S*0.5) - ux*(S*0.5);
-    return `
-      <g>
-        <line x1="${VB.cx}" y1="${VB.cy}" x2="${p.x}" y2="${p.y}"
-              stroke="${edgeColor}" stroke-opacity="0.35" stroke-width="1.5"/>
-        <polygon points="${tx},${ty} ${b1x},${b1y} ${b2x},${b2y}"
-                 fill="${edgeColor}" fill-opacity="0.65"/>
-        ${lbl ? `<text x="${lx}" y="${ly}" text-anchor="middle"
-              style="font-family:${mono};font-size:10.5px;letter-spacing:0.02em;" fill="${edgeColor}">
-          ${esc(lbl)}
-        </text>` : ""}
-      </g>`;
-  }).join("");
+// Small control to switch how many rings are shown.
+function buildDepthControl() {
+  const btn = d => {
+    const on = d === clusterDepth;
+    return `<button class="depth-btn" data-depth="${d}" aria-label="Show ${d} ring${d > 1 ? "s" : ""}"
+      style="background:${on ? C.red : "rgba(255,255,255,0.05)"};border:1px solid ${on ? C.red : "rgba(255,255,255,0.12)"};color:${on ? "#fff" : C.muted};font-family:${mono};font-size:11px;width:26px;height:24px;border-radius:6px;cursor:pointer;padding:0;">${d}</button>`;
+  };
+  return `
+    <div style="position:absolute;top:12px;left:12px;z-index:10;display:flex;align-items:center;gap:6px;${glass}border-radius:9px;padding:6px 9px;">
+      <span style="font-family:${mono};font-size:9.5px;color:${C.muted};text-transform:uppercase;letter-spacing:0.08em;">Depth</span>
+      ${[1, 2, 3].map(btn).join("")}
+    </div>`;
+}
 
-  const nbs = placed.map(p => {
-    const nodeColor = p.direction === "in" ? C.slate : C.red;
-    const lines = wrapName(p.node.name, 18);
-    const twoLine = lines.length > 1;
-    const boxH = twoLine ? 62 : 48;
-    const nameY = twoLine ? p.y - 11 : p.y - 3;
-    const typeY = twoLine ? p.y + 21 : p.y + 13;
-    const nameText = twoLine
-      ? `<tspan x="${p.x}" dy="0">${esc(lines[0])}</tspan><tspan x="${p.x}" dy="15">${esc(lines[1])}</tspan>`
-      : esc(lines[0]);
-    return `
-      <g class="nb-group" data-nid="${p.node.id}" tabindex="0" role="button"
-         aria-label="Move to ${esc(p.node.name)}" style="cursor:pointer;">
-        <title>${esc(p.node.name)}</title>
-        <rect x="${p.x - 76}" y="${p.y - boxH / 2}" width="152" height="${boxH}" rx="10"
-              fill="rgba(255,255,255,0.04)" stroke="${nodeColor}" stroke-opacity="0.55" stroke-width="1.5"/>
-        <text x="${p.x}" y="${nameY}" text-anchor="middle"
-              style="font-family:${mono};font-size:12.5px;" fill="${C.paper}">
-          ${nameText}
-        </text>
-        <text x="${p.x}" y="${typeY}" text-anchor="middle"
-              style="font-family:${sans};font-size:10px;letter-spacing:0.04em;" fill="${C.muted}">
-          ${esc(p.node.type)}
-        </text>
-      </g>`;
-  }).join("");
+// Ring-1 edge: centre → neighbour, with arrowhead and a label offset off the line.
+function edge1SVG(p) {
+  const dir = p.direction;
+  const lbl = p.link.label || "";
+  const edgeColor = dir === "in" ? C.slate : C.red;
+  const dx = p.x - VB.cx, dy = p.y - VB.cy;
+  const len = Math.sqrt(dx*dx + dy*dy) || 1;
+  const ux = dx/len, uy = dy/len;
+  const mx = (VB.cx + p.x) / 2, my = (VB.cy + p.y) / 2;
+  // "out": arrow points center→child; "in": parent→center
+  const sign = dir === "out" ? 1 : -1;
+  const S = 7;
+  const tx = mx + sign*ux*S, ty = my + sign*uy*S;
+  const b1x = mx - sign*ux*(S*0.5) + (-uy)*(S*0.5), b1y = my - sign*uy*(S*0.5) + ux*(S*0.5);
+  const b2x = mx - sign*ux*(S*0.5) - (-uy)*(S*0.5), b2y = my - sign*uy*(S*0.5) - ux*(S*0.5);
+  // Offset the label perpendicular to the line so it never sits on the arrow.
+  const off = 11;
+  const lx = mx + (-uy) * off, ly = my + ux * off;
+  return `
+    <g>
+      <line x1="${VB.cx}" y1="${VB.cy}" x2="${p.x}" y2="${p.y}"
+            stroke="${edgeColor}" stroke-opacity="0.35" stroke-width="1.5"/>
+      <polygon points="${tx},${ty} ${b1x},${b1y} ${b2x},${b2y}"
+               fill="${edgeColor}" fill-opacity="0.65"/>
+      ${lbl ? `<text x="${lx}" y="${ly}" text-anchor="middle" dominant-baseline="middle"
+            style="font-family:${mono};font-size:10.5px;letter-spacing:0.02em;" fill="${edgeColor}">${esc(lbl)}</text>` : ""}
+    </g>`;
+}
+
+// Outer-ring edge: from its inner-ring parent, muted, no label (secondary).
+function edge2SVG(p) {
+  const a = p.parent;
+  const op = p.ring === 2 ? 0.28 : 0.18;
+  return `<line x1="${a.x}" y1="${a.y}" x2="${p.x}" y2="${p.y}"
+            stroke="#5a5a5a" stroke-opacity="${op}" stroke-width="1"/>`;
+}
+
+// A neighbour box. Ring 1 keeps the parent/child colours; outer rings are
+// smaller (via their box preset) and muted so they read as secondary.
+function nodeGroupSVG(p) {
+  const b = p.box, o = b.o, w = b.w, h = b.h;
+  const x0 = p.x - w / 2, y0 = p.y - h / 2;
+  let stroke, strokeOp, nameFill, typeFill;
+  if (p.ring === 1) {
+    stroke = p.direction === "in" ? C.slate : C.red;
+    strokeOp = 0.55; nameFill = C.paper; typeFill = C.muted;
+  } else {
+    stroke = "#6a6a6a";
+    strokeOp = p.ring === 2 ? 0.40 : 0.28;
+    nameFill = p.ring === 2 ? "#b9b4ac" : "#8a857e";
+    typeFill = "#6a6560";
+  }
+  const nameY = y0 + o.padTop + o.nameFont;
+  const typeY = y0 + o.padTop + b.lines.length * o.nameLH + o.gap + o.typeFont;
+  const nameText = b.lines.map((l, i) =>
+    `<tspan x="${p.x}"${i === 0 ? "" : ` dy="${o.nameLH}"`}>${esc(l)}</tspan>`).join("");
+  return `
+    <g class="nb-group" data-nid="${p.node.id}" tabindex="0" role="button"
+       aria-label="Move to ${esc(p.node.name)}" style="cursor:pointer;">
+      <title>${esc(p.node.name)}</title>
+      <rect x="${x0}" y="${y0}" width="${w}" height="${h}" rx="9"
+            fill="rgba(255,255,255,0.04)" stroke="${stroke}" stroke-opacity="${strokeOp}" stroke-width="1.5"/>
+      <text x="${p.x}" y="${nameY}" text-anchor="middle"
+            style="font-family:${mono};font-size:${o.nameFont}px;" fill="${nameFill}">${nameText}</text>
+      <text x="${p.x}" y="${typeY}" text-anchor="middle"
+            style="font-family:${sans};font-size:${o.typeFont}px;letter-spacing:0.04em;" fill="${typeFill}">${esc(p.node.type)}</text>
+    </g>`;
+}
+
+function buildSVG(ring1, outer, bloom) {
+  // Outer rings under ring 1; outer boxes under ring-1 boxes.
+  const outerEdges = outer.map(edge2SVG).join("");
+  const ring1Edges = ring1.map(edge1SVG).join("");
+  const outerNodes = outer.map(nodeGroupSVG).join("");
+  const ring1Nodes = ring1.map(nodeGroupSVG).join("");
 
   const CN_W       = 220;
   const CN_RX      = 12;
@@ -1079,7 +1232,8 @@ function buildSVG(placed, bloom) {
       </defs>
       <g id="pz-group">
         <g class="${bloom ? "bloom" : ""}" style="transform-origin:${VB.cx}px ${VB.cy}px;">
-          ${edges}
+          ${outerEdges}
+          ${ring1Edges}
           <circle cx="${VB.cx}" cy="${VB.cy}" r="118" fill="url(#halo)"/>
           <g>
             <title>${esc(focusNode.name)}</title>
@@ -1094,7 +1248,8 @@ function buildSVG(placed, bloom) {
               ${cnTypeText}
             </text>
           </g>
-          ${nbs}
+          ${outerNodes}
+          ${ring1Nodes}
         </g>
       </g>
     </svg>`;
